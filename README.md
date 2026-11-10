@@ -208,10 +208,11 @@ that writes an approve/reject/abstain verdict per pending proposal — a
 stays human-authored. The discussion sandbox (`/discuss <a> <b> [topic]`)
 has two named agents take turns through the tuple space.
 
-The cross-process board (Tier 3.3 first slice) is wired: `--endpoint <url>`
-joins a shared HTTP board instead of opening an in-process one (see
-“Cross-process board” below). Generic agent panels (3.1) and multi-agent
-patterns (3.2) are the remaining Tier 3 work.
+The cross-process board (Tier 3.3) is wired: `--endpoint <url>` joins a
+shared HTTP board instead of opening an in-process one (see
+“Cross-process board” below). The one remaining Tier 3 item is the
+planner→worker→reviewer *pipeline* (the reviewer and discussion sandbox
+patterns are in; the chained pipeline is not).
 
 ## Cross-process board
 
