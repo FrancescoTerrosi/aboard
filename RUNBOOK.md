@@ -111,6 +111,19 @@ after your `/approve`, and a failed worker re-posts its claimed task — no
 work is lost. If a chat reply or the detail pane gets covered by a worker
 event, **`/chat`** (no argument) re-opens the transcript.
 
+Named, role-specialized workers and routing (the same loop, more structure):
+
+```
+/agent add writer writer writing     ← define a named worker with skills
+/tag t0 writing                      ← require the skill for task t0
+/dep t2 t0 t1                       ← t2 runs only after t0 and t1 complete
+/agent start writer                 ← the worker claims only matching tasks
+```
+
+A worker with skills claims tasks that are untagged or tagged with one of
+its skills; a generalist claims anything. `/dep` declares task dependencies
+(completion is signaled as `completed` tuples, so dependents become claimable).
+
 ## 3b. Generic agents + a reviewer (multi-agent patterns)
 
 Beyond the curated task workers, ABoard can run **generic agents** that

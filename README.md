@@ -122,6 +122,11 @@ create → plan → work → approve:
   stops before claiming new work.
 - **`/stop`** halts all workers (in-flight tasks finish first);
   **`/status`** shows pending tasks/proposals and worker progress.
+- **Named, role-specialized workers** — `/agent add <name> <role> [skills…]`
+  defines a worker; `/agent start <name>` runs it. **`/tag <task_id>
+  <skill>`** makes a task require a skill (a worker with skills claims only
+  untagged or matching tasks), and **`/dep <task_id> <dep1>…`** declares
+  task dependencies (workers skip tasks whose `completed` signals are unmet).
 - Everything is attributed in the WAL: `worker claimed t0 at seq N,`
   `proposed p1 at seq M, human applied at seq K`.
 
@@ -164,6 +169,15 @@ In the TUI (**`?` or `/help`** lists everything below):
   the parent exactly-once; subtasks get ids like `t0.1`). **`/work [n]`**
   launch n worker agents (claim → execute → propose — you approve).
   **`/stop`** halts workers; **`/status`** the board at a glance.
+- **`/agent [list]`** · **`/agent add <name> <role> [skills…]`** ·
+  **`/agent start <name>`** named, role-specialized workers. **`/tag <task_id>
+  <skill>`** require a skill; **`/dep <task_id> <dep1>…`** declare task
+  dependencies.
+- **`/spawn <name> <role> [skills…]`** launch a generic LLM agent on any
+  tuples; **`/agents`** the live transcript/budget/skills panel.
+  **`/review [pN]`** a reviewer writes a verdict per proposal (recommendation
+  only). **`/discuss <a> <b> [topic]`** two agents take turns through the
+  tuple space.
 - **`/mode [human|auto]`** show/switch the agent's mode (persists in the
   board). **`/stock [path|off]`** mount/show/unmount common knowledge.
 - **`/help`** (or **`?`**) the full command reference.
@@ -224,6 +238,10 @@ python -m tuple_space.server --host 127.0.0.1 --port 8765   # the board
 .venv/bin/aboard --endpoint http://127.0.0.1:8765 --name alice   # participant 1
 .venv/bin/aboard --endpoint http://127.0.0.1:8765 --name bob     # participant 2
 ```
+
+`tuple_space.server` needs the substrate's `.[server]` extra (fastapi/uvicorn;
+the same deps as ABoard's own `.[server]` extra). The ABoard *client* is
+stdlib-only (`HttpSpace` uses `tuple_space.sync_client`, no httpx).
 
 A thin `HttpSpace` adapter (stdlib-only) presents the same surface
 `Board`/`config`/`proposals`/`workers` use; each op is one wire dispatch.
