@@ -36,7 +36,7 @@ from typing import Callable, Optional
 
 from tuple_space.llm_client import OpenAICompatibleClient
 
-from .board import Board
+from .board import Board, board_view
 from .models import COMPLETED, DEPENDENCY, TASK_SKILL
 from .proposals import submit
 
@@ -162,10 +162,13 @@ class TaskWorker:
         return None
 
     async def _complete(self, system: str, user: str) -> str:
+        # Grounding: inject a bounded board view so the worker executes in the
+        # context of the current board instead of guessing in isolation.
+        briefing = f"{user}\n\n[current board]\n{board_view(self.space, actor=self.name)}"
         response = await self.client.create(
             model=self.llm.model,
             messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
+                      {"role": "user", "content": briefing}],
             timeout=120)
         self.tokens_used += getattr(response.usage, "total_tokens", 0)
         content = (response.choices[0].message.content or "").strip()
@@ -205,9 +208,10 @@ class TaskWorker:
                 return
             pid = submit(self.space, "add", "knowledge",
                          {"name": f"result {tid}",
-                          "context": f"task {tid}",
+                          "context": f"task {tid}: {instruction}",
                           "text": result},
-                         actor=self.name)
+                         actor=self.name,
+                         source={"tag": "task", "id": tid})
             # signal completion so dependent tasks become claimable
             self.space.out(COMPLETED, tid, None, actor=self.name)
             self.tasks_done += 1

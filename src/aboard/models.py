@@ -57,6 +57,7 @@ DEPENDENCY = "dependency"  # ("dependency", task_id, [deps]) — task dependenci
 COMPLETED = "completed"    # ("completed", task_id, None) — completion signal
 AGENT_TURN = "agent_turn"  # ("agent_turn", name, text) — generic-agent transcript
 REVIEW = "review"          # ("review", pid, verdict, rationale) — reviewer verdict
+DERIVED = "derived"        # ("derived", know_id, source_tag, source_id) — provenance
 
 # Tags that are infrastructure, not board content: they are excluded from the
 # "resumed N item(s)" count and never make a run non-empty on their own.
@@ -66,7 +67,7 @@ BOOKKEEPING_TAGS = frozenset({COUNTER_TAG, COMPLETED})
 # orchestration metadata, and bookkeeping.
 RESET_TAGS = frozenset({*TAGS, "chat", "proposal", "config", AGENT,
                         TASK_SKILL, DEPENDENCY, COUNTER_TAG, COMPLETED,
-                        AGENT_TURN, REVIEW})
+                        AGENT_TURN, REVIEW, DERIVED})
 
 # Per-process lock serializing id reservation. It makes ``reserve_id`` correct
 # under concurrent in-process writers (threads, the TUI's worker coroutines).

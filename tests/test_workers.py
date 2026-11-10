@@ -59,6 +59,26 @@ class WorkerTest(unittest.TestCase):
         self.assertIn("w0", {r["actor"] for r in muts})
         self.assertIn("no more tasks", events[-1])
 
+    def test_proposal_carries_self_contained_context_and_source(self):
+        self.space.out("task", "t0", "summarize the README", actor="human")
+        w = TaskWorker(self.space, name="w0", llm=self.llm,
+                       client=ScriptedClient(text_completion("summary")))
+        asyncio.run(w.run())
+        prop = self.space.rdp("proposal", "p0", None, None, None)
+        # context embeds the instruction (self-contained), source is structured
+        self.assertEqual(prop[4]["context"], "task t0: summarize the README")
+        self.assertEqual(prop[5], {"tag": "task", "id": "t0"})
+
+    def test_completion_grounds_on_the_board(self):
+        self.space.out("task", "t0", "do A", actor="human")
+        self.space.out("knowledge", "know0", "n", "c", "existing", actor="human")
+        w = TaskWorker(self.space, name="w0", llm=self.llm,
+                       client=ScriptedClient(text_completion("r")))
+        asyncio.run(w.run())
+        user = w.client.calls[0]["messages"][1]["content"]
+        self.assertIn("[current board]", user)
+        self.assertIn("existing", user)   # the knowledge item is in the briefing
+
     def test_two_workers_claim_exactly_once(self):
         for i in range(3):
             self.space.out("task", f"t{i}", f"do {i}", actor="human")

@@ -67,12 +67,14 @@ its own mode):
 | `auto` (opt-in) | read, **write** (`board_add` / `board_claim`) | the agent, directly |
 
 - **Human-driven** keeps the board human-authored: the agent's change lands
-  as a staging tuple `("proposal", p*N*, add|claim, tag, fields)` — the
-  proposal inbox is `/proposals`, `/approve [pN]` applies it through the
-  Board *attributed to you*, `/reject` discards. A proposal gets exactly
-  one decision (the take is atomic — E5's semantics, carried into ABoard),
-  and the WAL records the full story: agent proposed at seq N, you decided
-  at seq M. Pending proposals survive restarts.
+  as a staging tuple `("proposal", p*N*, add|claim, tag, fields, source)` —
+  the proposal inbox is `/proposals`, `/approve [pN]` applies it through the
+  Board *attributed to you*, `/reject` discards. ``source`` is optional
+  provenance (``{"tag", "id"}``); on approval it is recorded as a queryable
+  `("derived", new_id, tag, id)` relation. A proposal gets exactly one
+  decision (the take is atomic — E5's semantics, carried into ABoard), and
+  the WAL records the full story: agent proposed at seq N, you decided at
+  seq M. Pending proposals survive restarts.
 - **Auto** is for boards that are meant to be agent-driven. Same curated
   tools, no gate.
 - Either way the agent's only write path is the curated `board_*` tools
@@ -115,11 +117,14 @@ create → plan → work → approve:
   outside the autogen scheme, and workers claim them like any other task.
   A failed or degenerate plan re-posts the parent unchanged — no work lost.
 - **`/work [n]`** — launches `n` worker agents (default 1). Each claims a
-  task atomically (`inp` — exactly-once), executes it with the model, and
-  proposes the result as a *knowledge add* into the existing
-  `/proposals` inbox — **you** approve it onto the board. A worker that
-  fails re-posts its claimed task; a worker that crosses its token budget
-  stops before claiming new work.
+  task atomically (`inp` — exactly-once), executes it with the model
+  (grounded by a bounded board view, so results don't guess in isolation),
+  and proposes the result as a *knowledge add* into the existing
+  `/proposals` inbox — **you** approve it onto the board. The proposal
+  carries the task id as structured provenance and a self-contained context
+  (the instruction text), so approved knowledge links back via a `derived`
+  relation. A worker that fails re-posts its claimed task; a worker that
+  crosses its token budget stops before claiming new work.
 - **`/stop`** halts all workers (in-flight tasks finish first);
   **`/status`** shows pending tasks/proposals and worker progress.
 - **Named, role-specialized workers** — `/agent add <name> <role> [skills…]`
@@ -200,7 +205,7 @@ src/aboard/
   discussion.py Discussion: two named agents take turns through the tuple space (Tier 3.2)
   http_space.py HttpSpace: join a shared HTTP board via --endpoint (Tier 3.3)
   tui.py        the textual full-screen navigator
-tests/          147 tests (models, board, session, proposals, chat, config, workers,
+tests/          152 tests (models, board, session, proposals, chat, config, workers,
                 TUI, http_space, llm_agents, reviewer, discussion)
 ```
 

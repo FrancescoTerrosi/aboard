@@ -3,7 +3,7 @@
 A proposal is a tuple the chat agent writes when the human asks for a board
 change that the agent is not allowed to apply directly::
 
-    ("proposal", pid, kind, tag, values)
+    ("proposal", pid, kind, tag, values, source)
 
 - ``pid``: auto-generated (``p0, p1, …`` — max index + 1, the same monotonic
   rule as the curated ids; survives restarts and deletions).
@@ -11,6 +11,10 @@ change that the agent is not allowed to apply directly::
   (``values`` = ``{"id": …}``).
 - ``values``: a JSON-safe dict, validated at submit time so every stored
   proposal is applyable.
+- ``source``: optional JSON-safe provenance ``{"tag", "id"}`` — e.g. the task
+  a worker executed. On apply, the approver records it as a
+  ``("derived", new_id, tag, id)`` relation so provenance is queryable, not
+  just prose.
 
 Semantics (E5's work board, carried into ABoard): the agent proposes, the
 human decides. Deciding *takes* the proposal atomically (``inp``), so a
@@ -25,7 +29,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from .models import fields, key_field, reserve_id, spec
+from .models import DERIVED, fields, key_field, reserve_id, spec
 
 __all__ = ["ADD", "CLAIM", "PROPOSAL", "apply", "describe", "pending",
            "reject", "submit"]
@@ -35,11 +39,14 @@ ADD = "add"
 CLAIM = "claim"
 
 
-def submit(space, kind: str, tag: str, values: dict, *, actor: str) -> str:
+def submit(space, kind: str, tag: str, values: dict, *, actor: str,
+           source: Optional[dict] = None) -> str:
     """Write one proposal; returns its pid.
 
     Validates kind/tag/values so that every *stored* proposal is applyable —
     an apply-time failure would orphan a proposal the decision already took.
+    ``source`` is optional provenance (``{"tag": "task", "id": "t0.1"}``),
+    recorded as a ``derived`` relation when the proposal is applied.
     """
     if kind not in (ADD, CLAIM):
         raise ValueError(f"unknown proposal kind {kind!r} (expected add/claim)")
@@ -61,8 +68,14 @@ def submit(space, kind: str, tag: str, values: dict, *, actor: str) -> str:
         if not isinstance(tid, str) or not tid:
             raise ValueError("claim proposals need a non-empty 'id'")
 
+    if source is not None:
+        if not isinstance(source, dict) or not isinstance(source.get("tag"), str) \
+                or not source["tag"] or not isinstance(source.get("id"), str) \
+                or not source["id"]:
+            raise ValueError("source must be {'tag': str, 'id': str}")
+
     pid = reserve_id(space, PROPOSAL, "p", actor=actor)
-    space.out(PROPOSAL, pid, kind, tag, dict(values), actor=actor)
+    space.out(PROPOSAL, pid, kind, tag, dict(values), source, actor=actor)
     return pid
 
 
@@ -85,13 +98,18 @@ def _take(space, pid: Optional[str], *, actor) -> Optional[tuple]:
 def apply(space, board, pid: Optional[str] = None, *,
           actor=None) -> str:
     """Decide one proposal and apply it through the Board (attributed to the
-    approver). ``board`` is the human's Board — the agent never applies."""
+    approver). ``board`` is the human's Board — the agent never applies.
+    Provenance (``source``) is recorded as a ``derived`` relation after the
+    item lands, so the link is queryable."""
     t = _take(space, pid, actor=actor)
     if t is None:
         return f"no {'proposal ' + pid if pid else 'pending proposals'}"
     kind, tag, values = t[2], t[3], t[4]
+    source = t[5] if len(t) > 5 else None  # old 5-field proposals: no source
     if kind == ADD:
         tid = board.insert(tag, **values)
+        if source:
+            space.out(DERIVED, tid, source["tag"], source["id"], actor=actor)
         return f"{t[1]}: added {tag} {tid}"
     if kind == CLAIM:
         got = board.remove(tag, values["id"])
@@ -111,7 +129,9 @@ def reject(space, pid: Optional[str] = None, *, actor=None) -> str:
 def describe(t: tuple) -> str:
     """One-line human-readable rendering (the /proposals view, tool results)."""
     pid, kind, tag, values = t[1], t[2], t[3], t[4]
+    source = t[5] if len(t) > 5 else None
     if kind == ADD:
         preview = ", ".join(f"{k}={v!r}" for k, v in values.items())
-        return f"{pid}: add {tag} ({preview})"
+        src = f" ← {source['tag']} {source['id']}" if source else ""
+        return f"{pid}: add {tag} ({preview}){src}"
     return f"{pid}: claim {tag} {values.get('id')}"

@@ -200,7 +200,8 @@ class HumanModeTest(unittest.TestCase):
         # staged, attributed to the agent; the board itself is untouched
         self.assertEqual(self.space.read_all("proposal", None, None, None, None),
                          [("proposal", "p0", "add", "knowledge",
-                           {"name": "API note", "context": "dev", "text": "…"})])
+                           {"name": "API note", "context": "dev", "text": "…"},
+                           None)])
         self.assertEqual(self.space.read_all("knowledge", None, None, None, None), [])
         tool_msg = client.calls[1]["messages"][-1]
         self.assertIn("pending the human's approval", tool_msg["content"])

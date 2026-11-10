@@ -76,6 +76,21 @@ class ReviewerTest(unittest.TestCase):
         # p0 got no verdict (filtered out)
         self.assertEqual(self.space.read_all("review", p0, None, None), [])
 
+    def test_review_context_includes_board_and_sibling_proposals(self):
+        self.space.out("knowledge", "know0", "n", "c", "existing", actor="human")
+        self._proposal()
+        submit(self.space, "add", "task", {"instruction": "x"}, actor="agent")
+        client = ScriptedClient(completion("APPROVE ok"),
+                                completion("REJECT no"))
+        asyncio.run(review(self.space, llm=self.llm, actor="human",
+                           client=client))
+        # first review brief: board view + the OTHER proposal + the target
+        brief = client.calls[0]["messages"][1]["content"]
+        self.assertIn("[current board]", brief)
+        self.assertIn("existing", brief)          # board grounding
+        self.assertIn("Other pending proposals", brief)
+        self.assertIn("add task", brief)
+
     def test_parse_verdict_direct(self):
         self.assertEqual(_parse_verdict("APPROVE yes"), ("approve", "yes"))
         self.assertEqual(_parse_verdict("reject: bad"), ("reject", "bad"))

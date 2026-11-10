@@ -288,7 +288,7 @@ contract, and ABoard inherits it.
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests
 ```
 
-147 tests, all deterministic — no network, no terminal (the LLM is faked
+152 tests, all deterministic — no network, no terminal (the LLM is faked
 through a scripted client; TUI flows run under Textual's headless pilot; the
 HTTP-board tests run a real uvicorn server on loopback).
 

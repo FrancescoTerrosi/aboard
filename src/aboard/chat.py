@@ -40,7 +40,7 @@ from typing import Optional
 from tuple_space import BudgetExceeded
 from tuple_space.llm_client import OpenAICompatibleClient
 
-from .board import Board
+from .board import Board, board_view, format_tuples
 from .models import TAGS, TAG_SPECS, fields
 from .proposals import describe, pending, submit
 
@@ -50,7 +50,6 @@ MODES = ("human", "auto")
 
 # bounds — keep the board chat-sized.
 HISTORY_TURNS = 12
-BOARD_PREVIEW = 8
 TOOL_RESULT_MAX = 20
 TURN_TEXT_MAX = 4000
 
@@ -189,15 +188,6 @@ def _tool_schema(mode: str, stock) -> list[dict]:
     return tools
 
 
-def _format_tuples(tuples: list, limit: int = TOOL_RESULT_MAX) -> str:
-    """Render tuples for the model, repr-quoted like the substrate's agent."""
-    if not tuples:
-        return "0 items"
-    shown = "; ".join(", ".join(repr(v) for v in t) for t in tuples[:limit])
-    more = f"; … (+{len(tuples) - limit} more)" if len(tuples) > limit else ""
-    return f"{len(tuples)} items: {shown}{more}"
-
-
 class ChatAgent:
     """A conversational agent whose only write path is the curated Board.
 
@@ -244,12 +234,7 @@ class ChatAgent:
 
     def _board_view(self) -> str:
         """A bounded snapshot of the board, injected as turn context."""
-        lines = []
-        for tag in TAGS:
-            tuples = self.board.all(tag)
-            lines.append(f"{tag}: " + (_format_tuples(tuples, limit=BOARD_PREVIEW)
-                                      if tuples else "none"))
-        return "\n".join(lines)
+        return board_view(self.space, actor=self.name)
 
     def _messages(self) -> list[dict]:
         """System prompt + real conversation history (from the space)."""
@@ -289,12 +274,12 @@ class ChatAgent:
                 tid = self.board.insert(args["tag"], **args.get("values", {}))
                 return f"ok: {args['tag']} {tid}"
             if name == "board_list":
-                return _format_tuples(self.board.all(args["tag"]))
+                return format_tuples(self.board.all(args["tag"]))
             if name == "board_get":
                 t = self.board.get(args["tag"], args.get("id", ""))
                 return ", ".join(repr(v) for v in t) if t else "null"
             if name == "board_search":
-                return _format_tuples(
+                return format_tuples(
                     self.board.search(args["tag"], **args.get("values", {})))
             if name == "board_claim":
                 t = self.board.remove(args["tag"], args.get("id", ""))
@@ -309,9 +294,9 @@ class ChatAgent:
                     return "no pending proposals"
                 return "; ".join(describe(t) for t in ps[:TOOL_RESULT_MAX])
             if name == "stock_list":
-                return _format_tuples(self._stock_find(args["tag"]))
+                return format_tuples(self._stock_find(args["tag"]))
             if name == "stock_search":
-                return _format_tuples(
+                return format_tuples(
                     self._stock_find(args["tag"], args.get("values", {})))
         except (KeyError, TypeError, ValueError) as e:
             return f"error: {e}"

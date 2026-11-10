@@ -20,6 +20,7 @@ from typing import Optional
 
 from tuple_space.llm_client import OpenAICompatibleClient
 
+from .board import board_view
 from .models import REVIEW
 from .proposals import describe, pending
 
@@ -47,6 +48,23 @@ def _parse_verdict(raw: str) -> tuple[str, str]:
     return verdict, rationale.strip()
 
 
+def _review_context(space, target, actor=None) -> str:
+    """The reviewer's brief: the board + sibling proposals + the target.
+
+    The bounded board view grounds the reviewer in current knowledge/tasks;
+    listing the *other* pending proposals lets it catch cross-proposal
+    inconsistencies (e.g. one artifact assumes a different port than the
+    rest) — the reconciliation a human would otherwise do by eye.
+    """
+    parts = ["[current board]\n" + board_view(space, actor=actor)]
+    siblings = [describe(p) for p in pending(space) if p[1] != target[1]]
+    if siblings:
+        parts.append("Other pending proposals:\n" +
+                     "\n".join(f"- {s}" for s in siblings))
+    parts.append("Review this proposal:\n" + describe(target))
+    return "\n\n".join(parts)
+
+
 async def review(space, *, llm, pid: Optional[str] = None,
                  actor: Optional[str] = None, client=None) -> list[str]:
     """Review pending proposals (or one ``pid``) and write verdict tuples.
@@ -70,7 +88,7 @@ async def review(space, *, llm, pid: Optional[str] = None,
         response = await client.create(
             model=llm.model,
             messages=[{"role": "system", "content": REVIEWER_PROMPT},
-                      {"role": "user", "content": describe(p)}],
+                      {"role": "user", "content": _review_context(space, p, actor)}],
             timeout=120)
         verdict, rationale = _parse_verdict(
             response.choices[0].message.content)

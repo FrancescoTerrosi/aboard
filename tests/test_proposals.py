@@ -81,6 +81,15 @@ class DecideTest(unittest.TestCase):
                          ("knowledge", "know0", "API note", "dev", "…"))
         self.assertEqual(pending(self.space), [])       # decided, exactly once
 
+    def test_apply_writes_derived_provenance(self):
+        submit(self.space, "add", "knowledge",
+               {"name": "result t0", "context": "task t0: summarize",
+                "text": "summary"},
+               actor="assistant", source={"tag": "task", "id": "t0"})
+        apply(self.space, self.board, actor="human")
+        self.assertEqual(self.space.read_all("derived", "know0", "task", "t0"),
+                         [("derived", "know0", "task", "t0")])
+
     def test_apply_claim_removes(self):
         self.board.insert("task", instruction="do it")
         submit(self.space, "claim", "task", {"id": "t0"}, actor="assistant")
@@ -127,6 +136,13 @@ class DecideTest(unittest.TestCase):
                          "text='…')")
         self.assertEqual(describe(("proposal", "p1", "claim", "task", {"id": "t0"})),
                          "p1: claim task t0")
+        # 6-field proposal carries provenance, rendered in the one-liner
+        t6 = ("proposal", "p2", "add", "knowledge",
+              {"name": "r", "context": "task t0", "text": "…"},
+              {"tag": "task", "id": "t0"})
+        self.assertEqual(describe(t6),
+                         "p2: add knowledge (name='r', context='task t0', "
+                         "text='…') ← task t0")
 
 
 if __name__ == "__main__":

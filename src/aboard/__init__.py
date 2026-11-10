@@ -16,6 +16,7 @@ from .models import (
     COMPLETED,
     COUNTER_TAG,
     DEPENDENCY,
+    DERIVED,
     KNOWLEDGE,
     RESET_TAGS,
     REVIEW,
@@ -36,7 +37,7 @@ from .models import (
     spec,
 )
 from . import agents, config
-from .board import Board
+from .board import Board, board_view, format_tuples
 from .chat import ChatAgent, LLMConfig, MODES
 from .discussion import Discussion
 from .http_space import HttpSpace
@@ -47,6 +48,8 @@ from .session import load_stock, open_space, prior_runs, runs_root
 
 __all__ = [
     "Board",
+    "board_view",
+    "format_tuples",
     "HttpSpace",
     "GenericAgent",
     "Discussion",
@@ -84,6 +87,7 @@ __all__ = [
     "AGENT",
     "AGENT_TURN",
     "REVIEW",
+    "DERIVED",
     "TASK_SKILL",
     "DEPENDENCY",
     "COMPLETED",

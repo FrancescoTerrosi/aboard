@@ -10,6 +10,7 @@ Filter  = client-side substring over the loaded board (navigation only; never
 from __future__ import annotations
 
 from .models import (
+    TAGS,
     all_template,
     fields,
     id_prefix,
@@ -19,6 +20,31 @@ from .models import (
     search_template,
     spec,
 )
+
+
+def format_tuples(tuples: list, limit: int = 20) -> str:
+    """Render tuples for the model, repr-quoted so field boundaries are
+    unambiguous even when content contains commas."""
+    if not tuples:
+        return "0 items"
+    shown = "; ".join(", ".join(repr(v) for v in t) for t in tuples[:limit])
+    more = f"; … (+{len(tuples) - limit} more)" if len(tuples) > limit else ""
+    return f"{len(tuples)} items: {shown}{more}"
+
+
+def board_view(space, *, actor=None, per_tag: int = 8) -> str:
+    """A bounded snapshot of the curated board, injected as agent context.
+
+    Read-only (a ``read_all`` per tag) and capped per tag, so workers and the
+    reviewer get grounding without an unbounded context. The tuple space's
+    retrieval discipline: a curated, bounded briefing beats a full dump.
+    """
+    lines = []
+    for tag in TAGS:
+        tuples = space.read_all(*all_template(tag), actor=actor)
+        lines.append(f"{tag}: " + (format_tuples(tuples, limit=per_tag)
+                                   if tuples else "none"))
+    return "\n".join(lines)
 
 
 class Board:
