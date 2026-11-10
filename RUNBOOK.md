@@ -134,6 +134,19 @@ the board stays human-authored (`/approve` / `/reject` remain the human's
 decision, and an unparseable reviewer reply is a safe "abstain", never an
 approval).
 
+The **discussion sandbox** is two named agents taking turns through the same
+board (no separate space):
+
+```
+/discuss alice bob the release plan    ← two agents alternate turns
+/discuss                                ← re-open the interleaved transcript
+/stop alice                             ← end it (either name stops the loop)
+```
+
+Each turn is an `agent_turn` tuple; the driver feeds each agent the other's
+recent turns as context. There is no agent-to-agent channel — the tuple space
+is the only medium.
+
 ## 4. Chat with the agent (human-driven, the default)
 
 Chat needs an endpoint. Check what is installed, then pick a model:

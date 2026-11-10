@@ -54,7 +54,7 @@ class GenericAgent:
 
     def __init__(self, space, *, name: str, role: str, llm,
                  skills: list[str] | None = None, goal: str | None = None,
-                 client=None):
+                 system_prompt: str | None = None, client=None):
         self.space = space
         self.name = name
         self.role = role
@@ -66,7 +66,7 @@ class GenericAgent:
         self.turns = 0
         self._stopped = False
 
-        prompt = GENERIC_PROMPT
+        prompt = system_prompt or GENERIC_PROMPT
         if goal:
             prompt += f"\nYour goal: {goal}."
         self._agent = LLMAgent(
@@ -87,12 +87,32 @@ class GenericAgent:
         # context; otherwise the agent gets the substrate's default nudge.
         return self.goal or ""
 
+    async def step(self, context: str = "") -> str | None:
+        """One reasoning step: run the substrate agent, record the turn.
+
+        Returns the (stripped) content, or ``None`` when the model produced
+        nothing. Raises ``BudgetExceeded`` at the next step boundary once the
+        budget is crossed (the substrate's rule).
+        """
+        result = await self._agent.step(context=context)
+        self.tokens_used = self._agent.tokens_used
+        self.api_calls = self._agent.api_calls
+        text = (result.get("content") or "").strip()
+        # The substrate maps an empty assistant message to this sentinel; for
+        # a transcript it means "no prose this turn" — not a real turn.
+        if text == "(tool calls only)":
+            text = ""
+        if text:
+            self.space.out(AGENT_TURN, self.name, text, actor=self.name)
+            self.turns += 1
+        return text or None
+
     async def run(self, on_event: Optional[Callable[[str], None]] = None,
                   *, max_steps: int = MAX_STEPS) -> None:
         """Step until stopped / budget / step limit, recording each turn."""
         while not self._stopped and self.turns < max_steps:
             try:
-                result = await self._agent.step(context=self._context())
+                text = await self.step(self._context())
             except BudgetExceeded as e:
                 if on_event:
                     on_event(f"{self.name}: {e}")
@@ -101,14 +121,8 @@ class GenericAgent:
                 if on_event:
                     on_event(f"{self.name}: failed ({e})")
                 return
-            self.tokens_used = self._agent.tokens_used
-            self.api_calls = self._agent.api_calls
-            text = (result.get("content") or "").strip()
-            if text:
-                self.space.out(AGENT_TURN, self.name, text, actor=self.name)
-                self.turns += 1
-                if on_event:
-                    on_event(f"{self.name}: {text[:60]}")
+            if text and on_event:
+                on_event(f"{self.name}: {text[:60]}")
         if on_event:
             self._done(on_event)
 

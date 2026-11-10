@@ -664,6 +664,73 @@ class TuiSmokeTest(unittest.TestCase):
                 space.close()
         asyncio.run(run())
 
+    def test_discuss_command_starts_and_shows_transcript(self):
+        """Tier 3.2 sandbox: /discuss starts two agents, writes interleaved
+        turns, /discuss re-opens the transcript, /stop ends it."""
+        async def run():
+            with tempfile.TemporaryDirectory() as d:
+                space = TupleSpace(run_root=d)
+                board = Board(space, actor="human")
+                app = BoardApp(board=board, human="human")
+                import aboard.tui as tui_mod
+                orig = tui_mod.Discussion
+
+                class FakeAgent:
+                    def __init__(self, name):
+                        self.name = name
+                        self.role = "discussant"
+                        self.skills = []
+                        self.tokens_used = 0
+                        self.turns = 0
+                        self._stopped = False
+                    def stop(self):
+                        self._stopped = True
+
+                class FakeDiscussion:
+                    def __init__(self, space, *, a_name, b_name, llm,
+                                 topic="", rounds=3, client_a=None, client_b=None):
+                        self.space = space
+                        self.a = FakeAgent(a_name)
+                        self.b = FakeAgent(b_name)
+                        self.topic = topic
+                    def stop(self):
+                        self.a.stop()
+                        self.b.stop()
+                    async def run(self, on_event=None):
+                        self.space.out("agent_turn", self.a.name, "hi",
+                                       actor=self.a.name)
+                        self.space.out("agent_turn", self.b.name, "yo",
+                                       actor=self.b.name)
+                        self.a.turns = 1
+                        self.b.turns = 1
+                        if on_event:
+                            on_event(f"{self.a.name}: hi")
+
+                tui_mod.Discussion = FakeDiscussion
+                try:
+                    async with app.run_test() as pilot:
+                        await pilot.pause()
+                        app._run_command("/discuss alice bob the plan")
+                        await pilot.pause()
+                        self.assertIn("alice", app._llm_agents)
+                        self.assertIn("bob", app._llm_agents)
+                        self.assertEqual(len(app._discussions), 1)
+                        self.assertEqual(
+                            len(space.read_all("agent_turn", None, None)), 2)
+                        app._run_command("/discuss")   # re-open the transcript
+                        await pilot.pause()
+                        detail = app.query_one("#detail_body", Markdown)
+                        md = getattr(detail, "_markdown", "") or ""
+                        self.assertIn("alice", md)
+                        self.assertIn("bob", md)
+                        app._run_command("/stop alice")
+                        await pilot.pause()
+                        self.assertTrue(app._llm_agents["alice"]._stopped)
+                finally:
+                    tui_mod.Discussion = orig
+                space.close()
+        asyncio.run(run())
+
     def test_reset_command_twice_confirmed(self):
         async def run():
             with tempfile.TemporaryDirectory() as d:

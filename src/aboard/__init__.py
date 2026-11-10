@@ -38,6 +38,7 @@ from .models import (
 from . import agents, config
 from .board import Board
 from .chat import ChatAgent, LLMConfig, MODES
+from .discussion import Discussion
 from .http_space import HttpSpace
 from .llm_agents import GenericAgent
 from .proposals import ADD, CLAIM, PROPOSAL, apply, describe, pending, reject, submit
@@ -48,6 +49,7 @@ __all__ = [
     "Board",
     "HttpSpace",
     "GenericAgent",
+    "Discussion",
     "review",
     "config",
     "agents",

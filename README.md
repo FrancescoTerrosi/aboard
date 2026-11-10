@@ -183,10 +183,11 @@ src/aboard/
   agents.py     named worker definitions (name, role, skills) in the space
   llm_agents.py GenericAgent: arbitrary LLMAgents coordinating on any tuples (Tier 3.1)
   reviewer.py   review: a reviewer writes approve/reject/abstain verdicts (Tier 3.2)
+  discussion.py Discussion: two named agents take turns through the tuple space (Tier 3.2)
   http_space.py HttpSpace: join a shared HTTP board via --endpoint (Tier 3.3)
   tui.py        the textual full-screen navigator
-tests/          141 tests (models, board, session, proposals, chat, config, workers,
-                TUI, http_space, llm_agents, reviewer)
+tests/          147 tests (models, board, session, proposals, chat, config, workers,
+                TUI, http_space, llm_agents, reviewer, discussion)
 ```
 
 ## Status
@@ -204,7 +205,8 @@ launches an arbitrary `LLMAgent` coordinating on any tuples (live transcript,
 budget, and skills in the `/agents` panel), and `/review` runs a reviewer
 that writes an approve/reject/abstain verdict per pending proposal — a
 *recommendation only*; `/approve` stays the human's decision, so the board
-stays human-authored.
+stays human-authored. The discussion sandbox (`/discuss <a> <b> [topic]`)
+has two named agents take turns through the tuple space.
 
 The cross-process board (Tier 3.3 first slice) is wired: `--endpoint <url>`
 joins a shared HTTP board instead of opening an in-process one (see

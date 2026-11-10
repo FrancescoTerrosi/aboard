@@ -43,6 +43,7 @@ class DetailPane(VerticalScroll):
 from . import agents, config
 from .board import Board
 from .chat import ChatAgent, LLMConfig, MODES
+from .discussion import Discussion
 from .http_space import HttpSpace
 from .llm_agents import GenericAgent
 from .models import (AGENT_TURN, COUNTER_TAG, DEPENDENCY, RESET_TAGS, REVIEW,
@@ -118,6 +119,7 @@ class BoardApp(App):
         self._detail_view: str | None = None   # transient pane view (below)
         self._task_workers: dict[str, TaskWorker] = {}   # name → worker (see /work)
         self._llm_agents: dict[str, GenericAgent] = {}   # name → generic agent (see /spawn)
+        self._discussions: list[Discussion] = []          # active discussions (see /discuss)
         self._worker_seq = 0
         self._reset_armed = False        # /reset needs a second /reset to fire
         self._query = ""              # current filter text
@@ -308,6 +310,8 @@ class BoardApp(App):
             self._show_llm_agents()
         elif cmd == "review":
             self._review_cmd(arg)
+        elif cmd == "discuss":
+            self._discuss_cmd(arg)
         elif cmd == "tag":
             self._task_skill_cmd(arg)
         elif cmd == "dep":
@@ -690,6 +694,63 @@ class BoardApp(App):
             self.notify(f"review: {line}")
         self._refresh_view()
 
+    # ── discussion sandbox (Tier 3.2): /discuss ──────────────────────────
+
+    def _discuss_cmd(self, arg: str) -> None:
+        """`/discuss <name1> <name2> [topic]` — two named agents take turns.
+
+        The two ``GenericAgent``s converse through the tuple space (each turn
+        an ``agent_turn`` tuple); the driver alternates, feeding each agent the
+        other's recent turns. ``/discuss`` with no argument re-opens the
+        interleaved transcript; ``/stop <name>`` ends it.
+        """
+        arg = arg.strip()
+        if not arg:
+            self._show_discussion()
+            return
+        parts = arg.split()
+        if len(parts) < 2:
+            self.notify("usage: /discuss <name1> <name2> [topic]", severity="error")
+            return
+        name1, name2 = parts[0], parts[1]
+        topic = " ".join(parts[2:])
+        taken = set(self._task_workers) | set(self._llm_agents)
+        if name1 == name2 or name1 in taken or name2 in taken:
+            self.notify("agent names must be unique and not already running",
+                        severity="error")
+            return
+        d = Discussion(self.board.space, a_name=name1, b_name=name2,
+                       llm=self.llm or LLMConfig(), topic=topic)
+        self._llm_agents[name1] = d.a
+        self._llm_agents[name2] = d.b
+        self._discussions.append(d)
+        self.run_worker(d.run(on_event=self._worker_event),
+                        thread=False, group=f"discuss-{name1}-{name2}")
+        self.notify(f"discussion {name1} ↔ {name2} started — "
+                    "/agents to watch, /stop to end")
+
+    def _show_discussion(self, discussion: Discussion | None = None) -> None:
+        """The discussion view: the interleaved transcript of two agents."""
+        if discussion is None:
+            if not self._discussions:
+                self._detail_update(
+                    "## discussion\n\n(none — `/discuss <name1> <name2> [topic]` "
+                    "to start two agents taking turns)", view="discussion")
+                return
+            discussion = self._discussions[-1]
+        names = {discussion.a.name, discussion.b.name}
+        turns = [t for t in self.board.space.read_all(AGENT_TURN, None, None,
+                                                      actor=self.human)
+                 if t[1] in names]
+        lines = [f"## discussion: {discussion.a.name} ↔ {discussion.b.name}"]
+        if discussion.topic:
+            lines.append(f"topic: {discussion.topic}")
+        if not turns:
+            lines.append("(no turns yet)")
+        for t in turns:
+            lines.append(f"**{t[1]}:** {t[2]}")
+        self._detail_update("\n\n".join(lines), view="discussion")
+
     # ── task routing metadata: /tag <tid> <skill> · /dep <tid> <deps> ──
 
     def _task_skill_cmd(self, arg: str) -> None:
@@ -747,6 +808,8 @@ class BoardApp(App):
             self._show_proposals()
         elif self._detail_view == "status":
             self._show_status()
+        elif self._detail_view == "discussion":
+            self._show_discussion()
 
     def action_approve(self) -> None:
         self._decide(self._selected_proposal_pid(), approve=True)
@@ -886,6 +949,8 @@ class BoardApp(App):
   skills)
 - `/review [pN]` — a reviewer writes an approve/reject/abstain verdict per
   pending proposal (recommendation only — `/approve` still decides)
+- `/discuss <name1> <name2> [topic]` — two named agents take turns through the
+  tuple space · `/discuss` re-opens the interleaved transcript
 - `/tag <task_id> <skill>` — require a skill for a task
 - `/dep <task_id> <dep1> [dep2…]` — declare task dependencies
 - `/status` — tasks/proposals/agents/workers at a glance
