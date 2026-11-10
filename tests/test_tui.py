@@ -602,9 +602,11 @@ class TuiSmokeTest(unittest.TestCase):
                     detail = app.query_one("#detail_body", Markdown)
                     md = getattr(detail, "_markdown", "") or ""
                     self.assertIn("## help", md)
-                    for cmd in ("/add", "/search", "/chat", "/mode",
-                                "/proposals", "/approve", "/plan", "/work",
-                                "/stock", "/import", "/status", "/help"):
+                    for cmd in ("/add", "/del", "/search", "/clear",
+                                "/chat", "/mode", "/proposals", "/approve",
+                                "/reject", "/plan", "/work", "/stop",
+                                "/stock", "/import", "/status", "/reset",
+                                "/help"):
                         self.assertIn(cmd, md)
                     # it is a transient view: it survives table reloads
                     app._reload()
@@ -717,6 +719,59 @@ class TuiSmokeTest(unittest.TestCase):
                     self.assertIsNone(board.get("knowledge", "know1"))
                     from aboard.proposals import pending as pending_props
                     self.assertEqual(pending_props(space), [])
+                space.close()
+        asyncio.run(run())
+
+    def test_subtitle_shows_proposal_count(self):
+        """Pending proposals are always visible — the subtitle shows the count."""
+        async def run():
+            with tempfile.TemporaryDirectory() as d:
+                space = TupleSpace(run_root=d)
+                board = Board(space, actor="human")
+                board.insert("task", instruction="one")
+                from aboard.proposals import submit
+                app = BoardApp(board=board, human="human")
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    self.assertIn("0 proposal(s) pending", app.sub_title)
+                    submit(space, "add", "knowledge", {"name": "a", "text": "x"},
+                           actor="assistant")
+                    app._reload()
+                    await pilot.pause()
+                    self.assertIn("1 proposal(s) pending", app.sub_title)
+                space.close()
+        asyncio.run(run())
+
+    def test_proposals_view_navigable_and_decides_marked(self):
+        """`j` moves the marker; `a`/`r` decide the marked proposal, not always
+        the oldest."""
+        async def run():
+            with tempfile.TemporaryDirectory() as d:
+                space = TupleSpace(run_root=d)
+                board = Board(space, actor="human")
+                from aboard.proposals import submit, pending as pending_props
+                submit(space, "add", "knowledge", {"name": "a", "text": "x"},
+                       actor="assistant")
+                submit(space, "add", "knowledge", {"name": "b", "text": "y"},
+                       actor="assistant")
+                app = BoardApp(board=board, human="human")
+                async with app.run_test() as pilot:
+                    table = app.query_one("#table", DataTable)
+                    table.focus()
+                    await pilot.pause()
+                    app._run_command("/proposals")
+                    await pilot.pause()
+                    # marker starts on p0; move down to p1 and approve it
+                    await pilot.press("j")
+                    await pilot.pause()
+                    md = getattr(app.query_one("#detail_body", Markdown),
+                                 "_markdown", "") or ""
+                    self.assertIn("▶ p1", md)
+                    await pilot.press("a")
+                    await pilot.pause()
+                    # p1's item landed, p0 is still pending
+                    self.assertEqual(board.get("knowledge", "know0")[2], "b")
+                    self.assertEqual([t[1] for t in pending_props(space)], ["p0"])
                 space.close()
         asyncio.run(run())
 

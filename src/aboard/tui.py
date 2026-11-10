@@ -118,6 +118,8 @@ class BoardApp(App):
         self._query = ""              # current filter text
         self._tuples: dict[str, tuple] = {}  # id -> tuple, for the active tag
         self._current_tid: str | None = None
+        self._proposals: list[tuple] = []   # pending proposals (proposals view)
+        self._proposal_index = 0            # cursor in the proposals view
 
     # ── composition ─────────────────────────────────────────────────────
 
@@ -174,7 +176,8 @@ class BoardApp(App):
         # detail pane); restore the same row when it still exists
         if previous_tid and previous_tid in table.rows:
             table.move_cursor(row=list(table.rows).index(previous_tid))
-        self.sub_title = f"{len(rows)} {self._tag}"
+        self.sub_title = f"{len(rows)} {self._tag} · " \
+            f"{len(pending(self.board.space))} proposal(s) pending"
 
     def _render_detail(self, tup: tuple) -> str:
         tag, tid = tup[0], tup[1]
@@ -364,16 +367,26 @@ class BoardApp(App):
         self.notify(f"cleared {tag}")
 
     def _show_proposals(self) -> None:
-        """The pending-proposals view — the human-driven inbox."""
+        """The pending-proposals view — the human-driven inbox.
+
+        Navigable: ``j``/``k`` move the marker; ``a``/``r`` decide the marked
+        proposal (``/approve p<N>`` / ``/reject p<N>`` still target one
+        explicitly, and ``a``/``r`` outside this view decide the oldest).
+        """
         ps = pending(self.board.space)
+        self._proposals = ps
         if not ps:
+            self._proposal_index = 0
             self._detail_update("## proposals\n\n(none pending — ask the agent to "
                                 "propose, or /add directly)", view="proposals")
             return
+        self._proposal_index = max(0, min(self._proposal_index, len(ps) - 1))
         lines = [f"## proposals ({len(ps)} pending)",
-                 "`/approve` applies the oldest, `/approve p<N>` a specific "
-                 "one, `/reject` discards."]
-        lines.extend(f"- {describe(t)}" for t in ps)
+                 "`j`/`k` select · `a` approve · `r` reject the marked proposal",
+                 "`/approve [pN]` / `/reject [pN]` target one explicitly"]
+        for i, t in enumerate(ps):
+            marker = "▶" if i == self._proposal_index else " "
+            lines.append(f"{marker} {describe(t)}")
         self._detail_update("\n".join(lines), view="proposals")
 
     def _import_item(self, arg: str) -> None:
@@ -518,6 +531,17 @@ class BoardApp(App):
         self.notify(f"workers started: {', '.join(started)} — "
                     "claim → execute → propose; /approve applies, /stop halts")
 
+    def _selected_proposal_pid(self) -> str | None:
+        """The pid the proposals-view cursor is on (``None`` = oldest).
+
+        ``None`` means "decide the oldest pending proposal" — the existing
+        ``/approve`` / ``a`` / ``r`` default.
+        """
+        if (self._detail_view == "proposals"
+                and 0 <= self._proposal_index < len(self._proposals)):
+            return self._proposals[self._proposal_index][1]
+        return None
+
     def _decide(self, pid, *, approve: bool) -> None:
         """One decision, shared by /approve, /reject, `a`, `r` — then refresh
         the table AND the live view (a stale proposals list after approving
@@ -538,10 +562,10 @@ class BoardApp(App):
             self._show_status()
 
     def action_approve(self) -> None:
-        self._decide(None, approve=True)
+        self._decide(self._selected_proposal_pid(), approve=True)
 
     def action_reject(self) -> None:
-        self._decide(None, approve=False)
+        self._decide(self._selected_proposal_pid(), approve=False)
 
     def _worker_event(self, message: str) -> None:
         """Toast + refresh on every worker state change (claims empty the
@@ -606,6 +630,15 @@ class BoardApp(App):
 
     HELP = """## help
 
+**first run**
+
+- `/add task …` — put work on the board
+- `/plan` — split the highlighted task into subtasks (optional)
+- `/work 2` — launch 2 workers (claim → execute → propose)
+- `/proposals` — see what they proposed
+- `a` / `r` — approve / reject the marked proposal
+- `/chat hello` — talk to the board's agent
+
 **keys**
 
 - `/` filter, `enter` returns to the list · `:` command line
@@ -615,28 +648,42 @@ class BoardApp(App):
 - `enter` on a row = show that tuple in full (replaces any view)
 - `]` / `[` cycle tag · `1` / `2` / `3` jump to task / knowledge / skill
 - `n` new item · `d` delete the highlighted item · `?` this help · `ctrl+q` quit
-- `a` approve · `r` reject — the oldest pending proposal, one keystroke
+- `a` approve · `r` reject — in the proposals view: the marked proposal;
+  otherwise the oldest pending proposal
 
 **commands**
 
 - `/add task …` · `/add knowledge name | context | text` · `/add skill …`
+- `/del` — delete the highlighted item (same as `d`)
 - `/search <tag> <text>` — exact+wildcard associative search
 - `/clear [tag]` — remove every item of a tag
 - `/chat <text>` (or any bare text) — talk to the agent; `/chat` re-opens the
-  transcript · `/mode [human|auto]` — propose-then-approve vs direct writes
-- `/proposals` · `/approve [pN]` · `/reject [pN]` — the proposal inbox
+  transcript · `/mode [human|auto]` — show/switch mode (propose-then-approve
+  vs direct writes)
+- `/proposals` — the proposal inbox (`j`/`k` select, `a`/`r` decide)
+- `/approve [pN]` · `/reject [pN]` — decide a specific proposal
 - `/plan [id]` — decompose a task into 2–5 subtasks
 - `/work [n]` — launch worker agents (claim → execute → propose) · `/stop`
 - `/status` — tasks/proposals pending, workers at a glance
-- `/stock [path|off]` — mount shared knowledge read-only ·
-  `/import <tag> <id>` — copy a stock item onto the board
+- `/stock [path|off]` — mount shared knowledge read-only; `/stock` shows the
+  mount · `/import <tag> <id>` — copy a stock item onto the board
 - `/reset` — factory reset (clears items, chat, proposals AND settings;
   prior runs archived under `archive/`, type it twice)
 - `/help` — this view
 """
 
     def action_show_help(self) -> None:
-        self._detail_update(self.HELP, view="help")
+        self._detail_update(self._render_help(), view="help")
+
+    def _render_help(self) -> str:
+        """The help reference plus a live context footer (current board)."""
+        props = len(pending(self.board.space))
+        ctx = [
+            f"- chat mode: {self.chat_mode} (`/mode` to switch)",
+            f"- stock: {'mounted' if self.stock else 'none'} (`/stock` to mount)",
+            f"- proposals pending: {props}",
+        ]
+        return self.HELP + "\n\n**current board**\n\n" + "\n".join(ctx)
 
     def _show_status(self) -> None:
         """The /status view — the board at a glance."""
@@ -763,9 +810,18 @@ class BoardApp(App):
         self._reload()
 
     def action_cursor_down(self) -> None:
+        if self._detail_view == "proposals" and self._proposals:
+            self._proposal_index = min(self._proposal_index + 1,
+                                       len(self._proposals) - 1)
+            self._show_proposals()
+            return
         self.query_one("#table", DataTable).action_cursor_down()
 
     def action_cursor_up(self) -> None:
+        if self._detail_view == "proposals" and self._proposals:
+            self._proposal_index = max(self._proposal_index - 1, 0)
+            self._show_proposals()
+            return
         self.query_one("#table", DataTable).action_cursor_up()
 
 
