@@ -11,12 +11,14 @@ modifies the substrate, which stays schema-flexible underneath.
 
 from .models import (
     AGENT,
+    AGENT_TURN,
     BOOKKEEPING_TAGS,
     COMPLETED,
     COUNTER_TAG,
     DEPENDENCY,
     KNOWLEDGE,
     RESET_TAGS,
+    REVIEW,
     SKILL,
     TASK,
     TAGS,
@@ -37,12 +39,16 @@ from . import agents, config
 from .board import Board
 from .chat import ChatAgent, LLMConfig, MODES
 from .http_space import HttpSpace
+from .llm_agents import GenericAgent
 from .proposals import ADD, CLAIM, PROPOSAL, apply, describe, pending, reject, submit
+from .reviewer import review
 from .session import load_stock, open_space, prior_runs, runs_root
 
 __all__ = [
     "Board",
     "HttpSpace",
+    "GenericAgent",
+    "review",
     "config",
     "agents",
     "ChatAgent",
@@ -74,6 +80,8 @@ __all__ = [
     "reserve_id",
     "COUNTER_TAG",
     "AGENT",
+    "AGENT_TURN",
+    "REVIEW",
     "TASK_SKILL",
     "DEPENDENCY",
     "COMPLETED",

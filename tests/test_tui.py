@@ -593,6 +593,77 @@ class TuiSmokeTest(unittest.TestCase):
                 space.close()
         asyncio.run(run())
 
+    def test_spawn_agents_panel_and_review(self):
+        """Tier 3.1/3.2: /spawn tracks a generic agent, /agents renders its
+        transcript, /review toasts verdicts, and /stop halts a generic agent."""
+        async def run():
+            with tempfile.TemporaryDirectory() as d:
+                space = TupleSpace(run_root=d)
+                board = Board(space, actor="human")
+                app = BoardApp(board=board, human="human")
+                import aboard.tui as tui_mod
+                orig_generic = tui_mod.GenericAgent
+                orig_review = tui_mod.review
+
+                class FakeGeneric:
+                    def __init__(self, space, *, name, role, llm,
+                                 skills=(), goal=None):
+                        self.space = space
+                        self.name = name
+                        self.role = role
+                        self.skills = list(skills)
+                        self.tokens_used = 0
+                        self.turns = 0
+                        self._stopped = False
+                    def stop(self):
+                        self._stopped = True
+                    async def run(self, on_event=None):
+                        self.space.out("agent_turn", self.name, "a turn",
+                                       actor=self.name)
+                        self.turns = 1
+                        if on_event:
+                            on_event(f"{self.name}: a turn")
+
+                async def fake_review(space, *, llm, pid=None, actor=None,
+                                      client=None):
+                    return ["p0: approve — ok"]
+
+                tui_mod.GenericAgent = FakeGeneric
+                tui_mod.review = fake_review
+                toasts = []
+                app.notify = lambda msg, **kw: toasts.append(msg)
+                try:
+                    async with app.run_test() as pilot:
+                        await pilot.pause()
+                        app._run_command("/spawn alice analyst writing")
+                        await pilot.pause()
+                        self.assertIn("alice", app._llm_agents)
+                        self.assertEqual(app._llm_agents["alice"].skills,
+                                         ["writing"])
+                        # the generic agent wrote a transcript turn
+                        self.assertEqual(space.read_all("agent_turn", "alice", None),
+                                         [("agent_turn", "alice", "a turn")])
+                        app._run_command("/agents")
+                        await pilot.pause()
+                        detail = app.query_one("#detail_body", Markdown)
+                        md = getattr(detail, "_markdown", "") or ""
+                        self.assertIn("alice", md)
+                        self.assertIn("a turn", md)
+                        # reviewer toasts a verdict
+                        app._run_command("/review")
+                        await pilot.pause()
+                        self.assertTrue(any("review: p0: approve" in t
+                                            for t in toasts))
+                        # /stop halts the generic agent
+                        app._run_command("/stop alice")
+                        await pilot.pause()
+                        self.assertTrue(app._llm_agents["alice"]._stopped)
+                finally:
+                    tui_mod.GenericAgent = orig_generic
+                    tui_mod.review = orig_review
+                space.close()
+        asyncio.run(run())
+
     def test_reset_command_twice_confirmed(self):
         async def run():
             with tempfile.TemporaryDirectory() as d:

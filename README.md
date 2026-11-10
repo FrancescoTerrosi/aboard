@@ -180,8 +180,13 @@ src/aboard/
   proposals.py  the staging channel: submit / apply / reject (exactly one decision)
   config.py     runtime config (mode, stock mount) as ("config", key, value) tuples
   workers.py    TaskWorker + plan: claim → execute → propose, decompose into subtasks
+  agents.py     named worker definitions (name, role, skills) in the space
+  llm_agents.py GenericAgent: arbitrary LLMAgents coordinating on any tuples (Tier 3.1)
+  reviewer.py   review: a reviewer writes approve/reject/abstain verdicts (Tier 3.2)
+  http_space.py HttpSpace: join a shared HTTP board via --endpoint (Tier 3.3)
   tui.py        the textual full-screen navigator
-tests/          106 tests (models, board, session, proposals, chat, config, workers, TUI)
+tests/          141 tests (models, board, session, proposals, chat, config, workers,
+                TUI, http_space, llm_agents, reviewer)
 ```
 
 ## Status
@@ -193,6 +198,13 @@ read-only stock mounts, board-scoped config (`/mode`, `/stock`), and task
 execution (`/plan` planner, `/work` workers → proposals) are complete and
 tested. Named role-specialized agents, skill routing, and dependency-aware
 workers are complete (Tier 2).
+
+Generic agents and the reviewer pattern (Tier 3) are complete: `/spawn`
+launches an arbitrary `LLMAgent` coordinating on any tuples (live transcript,
+budget, and skills in the `/agents` panel), and `/review` runs a reviewer
+that writes an approve/reject/abstain verdict per pending proposal — a
+*recommendation only*; `/approve` stays the human's decision, so the board
+stays human-authored.
 
 The cross-process board (Tier 3.3 first slice) is wired: `--endpoint <url>`
 joins a shared HTTP board instead of opening an in-process one (see

@@ -44,8 +44,11 @@ from . import agents, config
 from .board import Board
 from .chat import ChatAgent, LLMConfig, MODES
 from .http_space import HttpSpace
-from .models import COUNTER_TAG, DEPENDENCY, RESET_TAGS, TAGS, TASK_SKILL, fields
+from .llm_agents import GenericAgent
+from .models import (AGENT_TURN, COUNTER_TAG, DEPENDENCY, RESET_TAGS, REVIEW,
+                     TAGS, TASK_SKILL, fields)
 from .proposals import apply, describe, pending, reject
+from .reviewer import review
 from .session import load_stock, open_space, prior_runs, reset
 from .workers import TaskWorker, plan
 
@@ -114,6 +117,7 @@ class BoardApp(App):
         self._tag = TAGS[0]           # the active tag
         self._detail_view: str | None = None   # transient pane view (below)
         self._task_workers: dict[str, TaskWorker] = {}   # name → worker (see /work)
+        self._llm_agents: dict[str, GenericAgent] = {}   # name → generic agent (see /spawn)
         self._worker_seq = 0
         self._reset_armed = False        # /reset needs a second /reset to fire
         self._query = ""              # current filter text
@@ -298,6 +302,12 @@ class BoardApp(App):
             self._work_cmd(arg)
         elif cmd == "agent":
             self._agent_cmd(arg)
+        elif cmd == "spawn":
+            self._spawn_cmd(arg)
+        elif cmd == "agents":
+            self._show_llm_agents()
+        elif cmd == "review":
+            self._review_cmd(arg)
         elif cmd == "tag":
             self._task_skill_cmd(arg)
         elif cmd == "dep":
@@ -394,6 +404,10 @@ class BoardApp(App):
         for i, t in enumerate(ps):
             marker = "▶" if i == self._proposal_index else " "
             lines.append(f"{marker} {describe(t)}")
+            rv = self.board.space.read_all(REVIEW, t[1], None, None,
+                                           actor=self.human)
+            if rv:
+                lines.append(f"    ↳ review: {rv[-1][2]} — {rv[-1][3]}")
         self._detail_update("\n".join(lines), view="proposals")
 
     def _import_item(self, arg: str) -> None:
@@ -605,6 +619,77 @@ class BoardApp(App):
             lines.append(f"- `{name}` — {role}{skills_s} ({state})")
         self._detail_update("\n".join(lines), view="agents")
 
+    # ── generic agents (Tier 3.1): /spawn · /agents ─────────────────────
+
+    def _spawn_cmd(self, arg: str) -> None:
+        """`/spawn <name> <role> [skills…]` — launch a generic ``LLMAgent``.
+
+        Unlike ``/agent`` (curated ``TaskWorker``s), a generic agent
+        coordinates on ANY tuples through the substrate's raw tools; it
+        steps until stopped or out of budget, recording each turn as an
+        ``agent_turn`` tuple. ``/agents`` shows the live transcript/budget;
+        ``/stop <name>`` halts it.
+        """
+        parts = arg.split()
+        if len(parts) < 2:
+            self.notify("usage: /spawn <name> <role> [skills…]", severity="error")
+            return
+        name, role = parts[0], parts[1]
+        skills = parts[2:]
+        if name in self._task_workers or name in self._llm_agents:
+            self.notify(f"{name!r} is already running", severity="warning")
+            return
+        a = GenericAgent(self.board.space, name=name, role=role,
+                         llm=self.llm or LLMConfig(), skills=skills)
+        self._llm_agents[name] = a
+        self.run_worker(a.run(on_event=self._worker_event),
+                        thread=False, group=f"agent-{name}")
+        skills_s = f" · skills: {', '.join(skills)}" if skills else ""
+        self.notify(f"agent {name} spawned: {role}{skills_s} — /agents to watch")
+
+    def _show_llm_agents(self) -> None:
+        """The generic-agents panel: live transcript, budget, skills."""
+        if not self._llm_agents:
+            self._detail_update(
+                "## agents\n\n(none running — `/spawn <name> <role> [skills…]` "
+                "to launch a generic agent)", view="agents")
+            return
+        lines = ["## agents"]
+        for name, a in self._llm_agents.items():
+            skills_s = f" · skills: {', '.join(a.skills)}" if a.skills else ""
+            lines.append(f"- `{name}` — {a.role}{skills_s} · {a.tokens_used:,} tokens"
+                         f" · {a.turns} turn(s)")
+            turns = self.board.space.read_all(AGENT_TURN, name, None,
+                                              actor=self.human)
+            for t in turns[-3:]:
+                lines.append(f"  - {t[2]}")
+        self._detail_update("\n".join(lines), view="agents")
+
+    # ── reviewer (Tier 3.2): /review ─────────────────────────────────────
+
+    def _review_cmd(self, arg: str) -> None:
+        """`/review [pN]` — run a reviewer over pending proposals.
+
+        The reviewer writes a verdict tuple per proposal (approve / reject /
+        abstain + rationale) — a *recommendation* only; ``/approve`` and
+        ``/reject`` stay the human's decision, so the board stays
+        human-authored. Runs in a worker (the LLM call is slow).
+        """
+        pid = arg.strip() or None
+        self.run_worker(self._do_review(pid), thread=False,
+                        exclusive=True, group="review")
+
+    async def _do_review(self, pid: str | None) -> None:
+        try:
+            results = await review(self.board.space, llm=self.llm or LLMConfig(),
+                                   pid=pid, actor=self.human)
+        except Exception as e:
+            self.notify(f"review failed: {e}", severity="error")
+            return
+        for line in results:
+            self.notify(f"review: {line}")
+        self._refresh_view()
+
     # ── task routing metadata: /tag <tid> <skill> · /dep <tid> <deps> ──
 
     def _task_skill_cmd(self, arg: str) -> None:
@@ -677,21 +762,27 @@ class BoardApp(App):
         self._refresh_view()
 
     def _stop_workers(self, name: str | None = None) -> None:
-        """/stop [name] — stop one worker, or all when no name is given."""
+        """`/stop [name]` — stop one worker/agent, or all when no name is given."""
         if name is not None:
             w = self._task_workers.get(name)
-            if w is None:
-                self.notify(f"no worker {name!r} running", severity="warning")
+            a = self._llm_agents.get(name)
+            if w is None and a is None:
+                self.notify(f"no worker or agent {name!r} running", severity="warning")
                 return
-            w.stop()
-            self.notify(f"stopping {name} (in-flight task finishes first)")
+            if w is not None:
+                w.stop()
+            if a is not None:
+                a.stop()
+            self.notify(f"stopping {name} (in-flight work finishes first)")
             return
-        if not self._task_workers:
-            self.notify("no workers running", severity="warning")
+        if not self._task_workers and not self._llm_agents:
+            self.notify("no workers or agents running", severity="warning")
             return
         for w in self._task_workers.values():
             w.stop()
-        self.notify("stopping workers (in-flight tasks finish first)")
+        for a in self._llm_agents.values():
+            a.stop()
+        self.notify("stopping workers and agents (in-flight work finishes first)")
 
     def _reset_cmd(self) -> None:
         """`/reset` — factory reset, twice-confirmed.
@@ -727,6 +818,8 @@ class BoardApp(App):
         self._reset_armed = False
         for w in self._task_workers.values():
             w.stop()
+        for a in self._llm_agents.values():
+            a.stop()
         result = reset(space, actor=self.human)
         cleared = sum(result["cleared"].values())
         self.chat_mode = "human"          # settings reset to defaults
@@ -788,6 +881,11 @@ class BoardApp(App):
 - `/agent [list]` · `/agent add <name> <role> [skills…]` ·
   `/agent start <name>` — named, role-specialized workers (skills gate task
   claims)
+- `/spawn <name> <role> [skills…]` — launch a generic LLM agent coordinating
+  on ANY tuples · `/agents` — the generic-agents panel (transcript, budget,
+  skills)
+- `/review [pN]` — a reviewer writes an approve/reject/abstain verdict per
+  pending proposal (recommendation only — `/approve` still decides)
 - `/tag <task_id> <skill>` — require a skill for a task
 - `/dep <task_id> <dep1> [dep2…]` — declare task dependencies
 - `/status` — tasks/proposals/agents/workers at a glance
@@ -837,6 +935,11 @@ class BoardApp(App):
                          for w in self._task_workers.values())
         else:
             lines.append("- workers: none (/work n starts some)")
+        if self._llm_agents:
+            lines.append("- generic agents:")
+            lines.extend(f"  - {a.name} ({a.role}): {a.turns} turn(s), "
+                         f"{a.tokens_used:,} tokens"
+                         for a in self._llm_agents.values())
         lines.append(f"- chat mode: {self.chat_mode} (/mode to switch)")
         self._detail_update("\n".join(lines), view="status")
 

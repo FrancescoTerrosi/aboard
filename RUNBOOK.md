@@ -111,6 +111,29 @@ after your `/approve`, and a failed worker re-posts its claimed task — no
 work is lost. If a chat reply or the detail pane gets covered by a worker
 event, **`/chat`** (no argument) re-opens the transcript.
 
+## 3b. Generic agents + a reviewer (multi-agent patterns)
+
+Beyond the curated task workers, ABoard can run **generic agents** that
+coordinate on *any* tuples (the substrate's raw tools), and a **reviewer**
+that recommends verdicts on pending proposals:
+
+```
+/spawn alice analyst writing,editing   ← launch a generic LLM agent
+/agents                                 ← live transcript, budget, skills
+/review                                 ← reviewer writes a verdict per proposal
+                                          (approve / reject / abstain + reason)
+/proposals                              ← the inbox now shows each review line
+/approve                                ← you still decide; the reviewer never applies
+/stop alice                             ← halt the generic agent
+```
+
+A generic agent steps until you stop it (or it runs out of budget), writing
+each turn to the board as an `agent_turn` tuple — so the transcript is part
+of the space and survives restarts. The reviewer is a *recommendation* only:
+the board stays human-authored (`/approve` / `/reject` remain the human's
+decision, and an unparseable reviewer reply is a safe "abstain", never an
+approval).
+
 ## 4. Chat with the agent (human-driven, the default)
 
 Chat needs an endpoint. Check what is installed, then pick a model:
