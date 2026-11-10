@@ -40,10 +40,10 @@ class DetailPane(VerticalScroll):
     ]
 
 
-from . import config
+from . import agents, config
 from .board import Board
 from .chat import ChatAgent, LLMConfig, MODES
-from .models import COUNTER_TAG, TAGS, fields
+from .models import COUNTER_TAG, DEPENDENCY, RESET_TAGS, TAGS, TASK_SKILL, fields
 from .proposals import apply, describe, pending, reject
 from .session import load_stock, open_space, prior_runs, reset
 from .workers import TaskWorker, plan
@@ -295,8 +295,14 @@ class BoardApp(App):
             self._plan_cmd(arg)
         elif cmd == "work":
             self._work_cmd(arg)
+        elif cmd == "agent":
+            self._agent_cmd(arg)
+        elif cmd == "tag":
+            self._task_skill_cmd(arg)
+        elif cmd == "dep":
+            self._dep_cmd(arg)
         elif cmd == "stop":
-            self._stop_workers()
+            self._stop_workers(arg.strip() or None)
         elif cmd == "status":
             self._show_status()
         elif cmd == "reset":
@@ -531,6 +537,101 @@ class BoardApp(App):
         self.notify(f"workers started: {', '.join(started)} — "
                     "claim → execute → propose; /approve applies, /stop halts")
 
+    # ── named agents: define / start / list ────────────────────────────
+
+    def _agent_cmd(self, arg: str) -> None:
+        """/agent [list] · /agent add <name> <role> [skills…] · /agent start <name>"""
+        sub, _, rest = arg.partition(" ")
+        sub = sub.strip()
+        if sub in ("", "list"):
+            self._show_agents()
+        elif sub == "add":
+            self._agent_add(rest.strip())
+        elif sub == "start":
+            self._agent_start(rest.strip())
+        else:
+            self.notify("usage: /agent [list] · /agent add <name> <role> "
+                        "[skills…] · /agent start <name>", severity="error")
+
+    def _agent_add(self, rest: str) -> None:
+        parts = rest.split()
+        if len(parts) < 2:
+            self.notify("usage: /agent add <name> <role> [skills…]",
+                        severity="error")
+            return
+        name, role = parts[0], parts[1]
+        skills = parts[2:]
+        try:
+            agents.add(self.board.space, name, role, skills, actor=self.human)
+        except ValueError as e:
+            self.notify(str(e), severity="error")
+            return
+        skills_s = f" · skills: {', '.join(skills)}" if skills else ""
+        self.notify(f"agent {name} added: {role}{skills_s}")
+
+    def _agent_start(self, name: str) -> None:
+        if not name:
+            self.notify("usage: /agent start <name>", severity="error")
+            return
+        defn = agents.get(self.board.space, name, actor=self.human)
+        if defn is None:
+            self.notify(f"no agent {name!r} — /agent add {name} <role> "
+                        "[skills…]", severity="error")
+            return
+        if name in self._task_workers:
+            self.notify(f"agent {name} is already running", severity="warning")
+            return
+        _, _, role, skills = defn
+        w = TaskWorker(self.board.space, name=name, llm=self.llm or LLMConfig(),
+                       role=role, skills=skills)
+        self._task_workers[name] = w
+        self.run_worker(w.run(on_event=self._worker_event),
+                        thread=False, group=f"worker-{name}")
+        self.notify(f"agent {name} started ({role})")
+
+    def _show_agents(self) -> None:
+        defs = agents.all_agents(self.board.space, actor=self.human)
+        if not defs:
+            self._detail_update(
+                "## agents\n\n(none defined — `/agent add <name> <role> [skills…]`)",
+                view="agents")
+            return
+        lines = ["## agents"]
+        for d in defs:
+            name, role, skills = d[1], d[2], d[3]
+            state = "running" if name in self._task_workers else "idle"
+            skills_s = f" · skills: {', '.join(skills)}" if skills else ""
+            lines.append(f"- `{name}` — {role}{skills_s} ({state})")
+        self._detail_update("\n".join(lines), view="agents")
+
+    # ── task routing metadata: /tag <tid> <skill> · /dep <tid> <deps> ──
+
+    def _task_skill_cmd(self, arg: str) -> None:
+        tid, _, skill = arg.partition(" ")
+        tid, skill = tid.strip(), skill.strip()
+        if not tid or not skill:
+            self.notify("usage: /tag <task_id> <skill>", severity="error")
+            return
+        if self.board.space.rdp("task", tid, None) is None:
+            self.notify(f"no task {tid!r} on the board", severity="warning")
+            return
+        self.board.space.out(TASK_SKILL, tid, skill, actor=self.human)
+        self.notify(f"task {tid} requires skill {skill!r}")
+
+    def _dep_cmd(self, arg: str) -> None:
+        parts = arg.split()
+        if len(parts) < 2:
+            self.notify("usage: /dep <task_id> <dep1> [dep2…]", severity="error")
+            return
+        tid, deps = parts[0], parts[1:]
+        if self.board.space.rdp("task", tid, None) is None:
+            self.notify(f"no task {tid!r} on the board", severity="warning")
+            return
+        # take + write: exactly one dependency tuple per task
+        self.board.space.inp(DEPENDENCY, tid, None, actor=self.human)
+        self.board.space.out(DEPENDENCY, tid, deps, actor=self.human)
+        self.notify(f"task {tid} depends on {', '.join(deps)}")
+
     def _selected_proposal_pid(self) -> str | None:
         """The pid the proposals-view cursor is on (``None`` = oldest).
 
@@ -574,7 +675,16 @@ class BoardApp(App):
         self._reload()
         self._refresh_view()
 
-    def _stop_workers(self) -> None:
+    def _stop_workers(self, name: str | None = None) -> None:
+        """/stop [name] — stop one worker, or all when no name is given."""
+        if name is not None:
+            w = self._task_workers.get(name)
+            if w is None:
+                self.notify(f"no worker {name!r} running", severity="warning")
+                return
+            w.stop()
+            self.notify(f"stopping {name} (in-flight task finishes first)")
+            return
         if not self._task_workers:
             self.notify("no workers running", severity="warning")
             return
@@ -594,7 +704,7 @@ class BoardApp(App):
         space = self.board.space
         if not self._reset_armed:
             counts = {tag: len(space.read_all(tag, actor=self.human))
-                      for tag in (*TAGS, "chat", "proposal", "config", COUNTER_TAG)}
+                      for tag in sorted(RESET_TAGS)}
             total = sum(counts.values())
             runs = 0
             if space.run_dir is not None:
@@ -663,8 +773,14 @@ class BoardApp(App):
 - `/proposals` — the proposal inbox (`j`/`k` select, `a`/`r` decide)
 - `/approve [pN]` · `/reject [pN]` — decide a specific proposal
 - `/plan [id]` — decompose a task into 2–5 subtasks
-- `/work [n]` — launch worker agents (claim → execute → propose) · `/stop`
-- `/status` — tasks/proposals pending, workers at a glance
+- `/work [n]` — launch anonymous workers (claim → execute → propose) ·
+  `/stop [name]` — stop one worker or all
+- `/agent [list]` · `/agent add <name> <role> [skills…]` ·
+  `/agent start <name>` — named, role-specialized workers (skills gate task
+  claims)
+- `/tag <task_id> <skill>` — require a skill for a task
+- `/dep <task_id> <dep1> [dep2…]` — declare task dependencies
+- `/status` — tasks/proposals/agents/workers at a glance
 - `/stock [path|off]` — mount shared knowledge read-only; `/stock` shows the
   mount · `/import <tag> <id>` — copy a stock item onto the board
 - `/reset` — factory reset (clears items, chat, proposals AND settings;
@@ -694,6 +810,16 @@ class BoardApp(App):
         lines = ["## status",
                  f"- tasks pending: {tasks}",
                  f"- proposals pending: {props}"]
+        agent_defs = agents.all_agents(space, actor=self.human)
+        if agent_defs:
+            lines.append("- agents:")
+            for d in agent_defs:
+                name, role, skills = d[1], d[2], d[3]
+                state = "running" if name in self._task_workers else "idle"
+                skills_s = f" · skills: {', '.join(skills)}" if skills else ""
+                lines.append(f"  - {name} ({role}{skills_s}) — {state}")
+        else:
+            lines.append("- agents: none (/agent add …)")
         if self._task_workers:
             lines.append("- workers:")
             lines.extend(f"  - {w.name}: {w.tasks_done} done, "

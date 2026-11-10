@@ -524,6 +524,75 @@ class TuiSmokeTest(unittest.TestCase):
                 space.close()
         asyncio.run(run())
 
+    def test_agent_commands_define_list_and_start(self):
+        """Named agents: /agent add persists a definition, /agent lists it,
+        /agent start spawns a role-specialized worker."""
+        async def run():
+            with tempfile.TemporaryDirectory() as d:
+                space = TupleSpace(run_root=d)
+                board = Board(space, actor="human")
+                app = BoardApp(board=board, human="human")
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    app._run_command("/agent add alice writer writing editing")
+                    await pilot.pause()
+                    self.assertEqual(space.rdp("agent", "alice", None, None),
+                                     ("agent", "alice", "writer",
+                                      ["editing", "writing"]))
+                    app._run_command("/agent")
+                    await pilot.pause()
+                    md = getattr(app.query_one("#detail_body", Markdown),
+                                 "_markdown", "") or ""
+                    self.assertIn("alice", md)
+                    self.assertIn("writer", md)
+                    app._run_command("/agent start alice")
+                    await pilot.pause()
+                    self.assertIn("alice", app._task_workers)
+                    self.assertEqual(app._task_workers["alice"].role, "writer")
+                    self.assertEqual(app._task_workers["alice"].skills,
+                                     ["editing", "writing"])
+                space.close()
+        asyncio.run(run())
+
+    def test_tag_and_dep_commands(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as d:
+                space = TupleSpace(run_root=d)
+                board = Board(space, actor="human")
+                board.insert("task", instruction="one")
+                board.insert("task", instruction="two")
+                app = BoardApp(board=board, human="human")
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    app._run_command("/tag t0 writing")
+                    app._run_command("/dep t1 t0")
+                    await pilot.pause()
+                    self.assertEqual(space.read_all("task_skill", None, None),
+                                     [("task_skill", "t0", "writing")])
+                    self.assertEqual(space.read_all("dependency", None, None),
+                                     [("dependency", "t1", ["t0"])])
+                space.close()
+        asyncio.run(run())
+
+    def test_stop_named_worker(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as d:
+                space = TupleSpace(run_root=d)
+                board = Board(space, actor="human")
+                app = BoardApp(board=board, human="human")
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    app._run_command("/work 2")
+                    await pilot.pause()
+                    names = sorted(app._task_workers)
+                    self.assertEqual(names, ["w0", "w1"])
+                    app._run_command("/stop w0")
+                    await pilot.pause()
+                    self.assertTrue(app._task_workers["w0"]._stopped)
+                    self.assertFalse(app._task_workers["w1"]._stopped)
+                space.close()
+        asyncio.run(run())
+
     def test_reset_command_twice_confirmed(self):
         async def run():
             with tempfile.TemporaryDirectory() as d:

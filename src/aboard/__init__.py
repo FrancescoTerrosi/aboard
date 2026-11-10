@@ -10,12 +10,18 @@ modifies the substrate, which stays schema-flexible underneath.
 """
 
 from .models import (
+    AGENT,
+    BOOKKEEPING_TAGS,
+    COMPLETED,
     COUNTER_TAG,
+    DEPENDENCY,
     KNOWLEDGE,
+    RESET_TAGS,
     SKILL,
     TASK,
     TAGS,
     TAG_SPECS,
+    TASK_SKILL,
     all_template,
     fields,
     id_prefix,
@@ -27,7 +33,7 @@ from .models import (
     search_template,
     spec,
 )
-from . import config
+from . import agents, config
 from .board import Board
 from .chat import ChatAgent, LLMConfig, MODES
 from .proposals import ADD, CLAIM, PROPOSAL, apply, describe, pending, reject, submit
@@ -36,6 +42,7 @@ from .session import load_stock, open_space, prior_runs, runs_root
 __all__ = [
     "Board",
     "config",
+    "agents",
     "ChatAgent",
     "LLMConfig",
     "MODES",
@@ -64,6 +71,12 @@ __all__ = [
     "next_id",
     "reserve_id",
     "COUNTER_TAG",
+    "AGENT",
+    "TASK_SKILL",
+    "DEPENDENCY",
+    "COMPLETED",
+    "BOOKKEEPING_TAGS",
+    "RESET_TAGS",
     "make_tuple",
     "search_template",
     "all_template",

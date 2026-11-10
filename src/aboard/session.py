@@ -44,7 +44,7 @@ from tuple_space import (
     replay_state,
 )
 
-from .models import COUNTER_TAG
+from .models import BOOKKEEPING_TAGS, RESET_TAGS
 
 __all__ = ["archive_prior_runs", "load_stock", "open_space", "prior_runs",
            "reset", "runs_root"]
@@ -110,7 +110,7 @@ def _resume_target(root: Path) -> tuple[Path, int] | None:
         # exclude id-counter bookkeeping: a run that only holds counters (an
         # insert-then-delete, or a partially-flushed session) is still empty
         state = [t for t in replay_state(load_run(run_dir))
-                 if t[0] != COUNTER_TAG]
+                 if t[0] not in BOOKKEEPING_TAGS]
         if state:
             return run_dir, len(state)
     return None
@@ -190,6 +190,7 @@ def reset(space, *, actor: str | None = None) -> dict:
     """Factory reset: clear *everything* — content, settings, transcript.
 
     Drains every curated tag, chat turns, pending proposals, config tuples,
+    orchestration metadata (agents, task skills, dependencies, completions),
     and id counters (so a reset board starts ids from scratch, matching the
     pre-counter scan behavior). Every take is a logged, attributed mutation,
     and prior runs are archived (never deleted), so
@@ -197,9 +198,8 @@ def reset(space, *, actor: str | None = None) -> dict:
     ``archive/`` holds the runs — moving one back restores that board,
     settings included.
     """
-    from .models import TAGS
     cleared = {tag: _drain(space, tag, actor=actor)
-               for tag in (*TAGS, "chat", "proposal", "config", COUNTER_TAG)}
+               for tag in sorted(RESET_TAGS)}
     return {"cleared": cleared, "archived": archive_prior_runs(space)}
 
 

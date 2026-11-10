@@ -48,6 +48,22 @@ TAGS = tuple(TAG_SPECS)
 # replaces.
 COUNTER_TAG = "id_counter"
 
+# Orchestration / bookkeeping tags — ABoard-level conventions that are NOT
+# curated board tags (they never appear in the task/knowledge/skill views).
+AGENT = "agent"            # ("agent", name, role, [skills]) — named worker def
+TASK_SKILL = "task_skill"  # ("task_skill", task_id, skill) — required skill
+DEPENDENCY = "dependency"  # ("dependency", task_id, [deps]) — task dependencies
+COMPLETED = "completed"    # ("completed", task_id, None) — completion signal
+
+# Tags that are infrastructure, not board content: they are excluded from the
+# "resumed N item(s)" count and never make a run non-empty on their own.
+BOOKKEEPING_TAGS = frozenset({COUNTER_TAG, COMPLETED})
+
+# Everything a factory reset must drain: curated content, chat/proposals/config,
+# orchestration metadata, and bookkeeping.
+RESET_TAGS = frozenset({*TAGS, "chat", "proposal", "config", AGENT,
+                        TASK_SKILL, DEPENDENCY, COUNTER_TAG, COMPLETED})
+
 # Per-process lock serializing id reservation. It makes ``reserve_id`` correct
 # under concurrent in-process writers (threads, the TUI's worker coroutines).
 # Cross-process atomicity relies on the counter tuple's ``inp`` claim; the

@@ -14,7 +14,7 @@ from tuple_space import TupleSpace
 from tuple_space.llm_client import OpenAICompatibleClient
 
 from aboard.chat import LLMConfig
-from aboard.workers import TaskWorker, plan
+from aboard.workers import TaskWorker, claim_task, plan, repost_task
 from tests_support import ScriptedClient, completion
 
 
@@ -106,6 +106,82 @@ class WorkerTest(unittest.TestCase):
         asyncio.run(w.run())
         self.assertEqual(w.tasks_done, 0)
 
+    def test_role_and_skills_shape_the_prompt(self):
+        w = TaskWorker(self.space, name="alice", llm=self.llm,
+                       role="writer", skills=["writing", "editing"])
+        prompt = w._system_prompt()
+        self.assertIn("writer", prompt)
+        self.assertIn("writing", prompt)
+        self.assertIn("editing", prompt)
+
+    def test_skill_routing_claims_matching_and_skips_others(self):
+        from aboard.models import TASK_SKILL
+        self.space.out("task", "t0", "write copy", actor="human")
+        self.space.out(TASK_SKILL, "t0", "writing", actor="human")
+        self.space.out("task", "t1", "fix bug", actor="human")
+        self.space.out(TASK_SKILL, "t1", "coding", actor="human")
+        self.space.out("task", "t2", "general task", actor="human")  # untagged
+        w = TaskWorker(self.space, name="writer", llm=self.llm,
+                       skills=["writing"],
+                       client=ScriptedClient(text_completion("r0"),
+                                             text_completion("r2")))
+        asyncio.run(w.run())
+        # matching (t0) and untagged (t2) claimed; coding (t1) left for a peer
+        self.assertEqual(self.space.read_all("task", None, None),
+                         [("task", "t1", "fix bug")])
+        self.assertEqual(w.tasks_done, 2)
+
+    def test_dependency_blocks_until_completed(self):
+        from aboard.models import COMPLETED, DEPENDENCY
+        self.space.out("task", "t0", "first", actor="human")
+        self.space.out("task", "t1", "second", actor="human")
+        self.space.out(DEPENDENCY, "t1", ["t0"], actor="human")
+        w = TaskWorker(self.space, name="w0", llm=self.llm,
+                       client=ScriptedClient(text_completion("r0"),
+                                             text_completion("r1")))
+        asyncio.run(w.run())
+        self.assertEqual(w.tasks_done, 2)
+        self.assertEqual(self.space.read_all("task", None, None), [])
+        self.assertEqual(self.space.read_all(COMPLETED, None, None),
+                         [("completed", "t0", None), ("completed", "t1", None)])
+
+    def test_dependency_blocked_task_not_claimed(self):
+        from aboard.models import DEPENDENCY
+        self.space.out("task", "t1", "do later", actor="human")
+        self.space.out(DEPENDENCY, "t1", ["t0"], actor="human")  # t0 never done
+        w = TaskWorker(self.space, name="w0", llm=self.llm,
+                       client=ScriptedClient())
+        events = []
+        asyncio.run(w.run(on_event=events.append))
+        self.assertEqual(w.tasks_done, 0)
+        self.assertEqual(self.space.read_all("task", None, None),
+                         [("task", "t1", "do later")])
+        self.assertTrue(any("no claimable tasks" in e for e in events))
+
+    def test_claim_task_detaches_and_repost_restores(self):
+        from aboard.models import DEPENDENCY, TASK_SKILL
+        self.space.out("task", "t0", "do", actor="human")
+        self.space.out(TASK_SKILL, "t0", "writing", actor="human")
+        self.space.out(DEPENDENCY, "t0", ["tx"], actor="human")
+        claimed = claim_task(self.space, "t0", actor="w0")
+        self.assertIsNotNone(claimed)
+        task, skills, deps = claimed
+        self.assertEqual(task, ("task", "t0", "do"))
+        self.assertEqual(skills, ["writing"])
+        self.assertEqual(deps, [["tx"]])
+        # metadata detached with the task
+        self.assertEqual(self.space.read_all("task", None, None), [])
+        self.assertEqual(self.space.read_all(TASK_SKILL, None, None), [])
+        self.assertEqual(self.space.read_all(DEPENDENCY, None, None), [])
+        # re-post restores everything
+        repost_task(self.space, task, skills, deps, actor="w0")
+        self.assertEqual(self.space.read_all("task", None, None),
+                         [("task", "t0", "do")])
+        self.assertEqual(self.space.read_all(TASK_SKILL, None, None),
+                         [("task_skill", "t0", "writing")])
+        self.assertEqual(self.space.read_all(DEPENDENCY, None, None),
+                         [("dependency", "t0", ["tx"])])
+
 
 class PlanTest(unittest.TestCase):
     def setUp(self):
@@ -137,6 +213,10 @@ class PlanTest(unittest.TestCase):
         from aboard.models import next_id
         self.assertEqual(next_id("task", self.space.read_all("task", None, None)),
                          "t0")
+        # the parent is marked completed, so dependents become claimable
+        from aboard.models import COMPLETED
+        self.assertEqual(self.space.read_all(COMPLETED, None, None),
+                         [("completed", "t0", None)])
 
     def test_failed_plan_reposts_the_parent(self):
         self.space.out("task", "t0", "build a website", actor="human")

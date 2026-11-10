@@ -19,6 +19,15 @@ E5's work board, carried into ABoard:
 Cost control: a worker stops before claiming new work once its token budget
 is crossed (the crossing task completes — a cut between a destructive claim
 and its proposal would be lost work).
+
+Tier 2 additions (role-specialized, coordinated workers):
+
+- **Role + skills.** A worker may carry a ``role`` (prompt guidance) and a
+  ``skills`` list. A worker with skills claims only tasks that are untagged
+  or tagged with skills it has; a generalist (no skills) claims anything.
+- **Dependencies.** A worker claims a task only when its ``("dependency",
+  tid, [deps])`` tuple is satisfied — every dependency has a ``("completed",
+  dep, None)`` signal, which workers (and the planner) write on success.
 """
 
 from __future__ import annotations
@@ -28,9 +37,11 @@ from typing import Callable, Optional
 from tuple_space.llm_client import OpenAICompatibleClient
 
 from .board import Board
+from .models import COMPLETED, DEPENDENCY, TASK_SKILL
 from .proposals import submit
 
-__all__ = ["MAX_SUBTASKS", "MIN_SUBTASKS", "TaskWorker", "plan"]
+__all__ = ["MAX_SUBTASKS", "MIN_SUBTASKS", "TaskWorker", "claim_task",
+           "plan", "repost_task"]
 
 MIN_SUBTASKS = 2
 MAX_SUBTASKS = 5
@@ -48,6 +59,45 @@ PLANNER_PROMPT = (
 )
 
 
+def claim_task(space, tid: str, *, actor: str | None = None):
+    """Atomically claim one task and detach its routing metadata.
+
+    The task itself is claimed with ``inp`` (exactly-once); its skill tags and
+    dependency tuple are drained so they don't orphan, and returned so the
+    caller can restore them if the task is re-posted (the failure path).
+
+    Returns ``(task, skills, deps)`` where ``task`` is the claimed tuple,
+    ``skills`` the skill strings, and ``deps`` a list of dependency lists.
+    Returns ``None`` when the task was already claimed by a peer.
+    """
+    task = space.inp("task", tid, None, actor=actor)
+    if task is None:
+        return None
+    skills = []
+    while True:
+        s = space.inp(TASK_SKILL, tid, None, actor=actor)
+        if s is None:
+            break
+        skills.append(s[2])
+    deps = []
+    while True:
+        d = space.inp(DEPENDENCY, tid, None, actor=actor)
+        if d is None:
+            break
+        deps.append(list(d[2]))
+    return task, skills, deps
+
+
+def repost_task(space, task, skills, deps, *, actor: str | None = None) -> None:
+    """Re-post a claimed task and its metadata (no work lost on failure)."""
+    space.out(*task, actor=actor)
+    tid = task[1]
+    for s in skills:
+        space.out(TASK_SKILL, tid, s, actor=actor)
+    for d in deps:
+        space.out(DEPENDENCY, tid, list(d), actor=actor)
+
+
 class TaskWorker:
     """One LLM worker: claim → execute → propose, until the board is empty.
 
@@ -57,10 +107,13 @@ class TaskWorker:
     deterministic tests (the LLM is the only seam).
     """
 
-    def __init__(self, space, *, name: str, llm, client=None):
+    def __init__(self, space, *, name: str, llm, client=None,
+                 role: str | None = None, skills: list[str] | None = None):
         self.space = space
         self.name = name
         self.llm = llm
+        self.role = role
+        self.skills = list(skills or [])
         self.board = Board(space, actor=name)   # every op attributed to me
         self.client = client if client is not None else \
             OpenAICompatibleClient(llm.base_url, api_key=llm.api_key)
@@ -71,6 +124,42 @@ class TaskWorker:
     def stop(self) -> None:
         """Stop before claiming new work (the in-flight task completes)."""
         self._stopped = True
+
+    def _system_prompt(self) -> str:
+        parts = [WORKER_PROMPT]
+        if self.role:
+            parts.append(f"Your role: {self.role}.")
+        if self.skills:
+            parts.append(f"Your skills: {', '.join(self.skills)}.")
+        return " ".join(parts)
+
+    def _matches_skill(self, tid: str) -> bool:
+        """True when this worker may claim ``tid`` (skill routing)."""
+        if not self.skills:
+            return True  # generalist claims anything
+        tags = self.space.read_all(TASK_SKILL, tid, None, actor=self.name)
+        if not tags:
+            return True  # untagged → any specialist may do it
+        return all(t[2] in self.skills for t in tags)
+
+    def _next_task(self):
+        """The next claimable task (``(task, skills, deps)``) or ``None``.
+
+        Scans pending tasks, skips those whose dependencies are unmet or whose
+        skill tags this worker cannot satisfy, and claims the first eligible
+        one by id. A task claimed by a peer between the scan and the take
+        simply falls through to the next candidate.
+        """
+        for t in self.space.read_all("task", None, None, actor=self.name):
+            tid = t[1]
+            if not self.space.are_dependencies_met(tid):
+                continue
+            if not self._matches_skill(tid):
+                continue
+            claimed = claim_task(self.space, tid, actor=self.name)
+            if claimed is not None:
+                return claimed
+        return None
 
     async def _complete(self, system: str, user: str) -> str:
         response = await self.client.create(
@@ -92,17 +181,25 @@ class TaskWorker:
                     on_event(f"{self.name}: budget exceeded "
                              f"({self.tokens_used:,} tokens) — stopping")
                 return
-            t = self.space.inp("task", None, None, actor=self.name)  # exactly-once
-            if t is None:
+            claimed = self._next_task()
+            if claimed is None:
+                remaining = len(self.space.read_all("task", None, None,
+                                                    actor=self.name))
+                if remaining:
+                    msg = (f"{self.name}: no claimable tasks "
+                           f"({remaining} pending — blocked by skills/deps)")
+                else:
+                    msg = f"{self.name}: no more tasks ({self.tasks_done} done)"
                 if on_event:
-                    on_event(f"{self.name}: no more tasks ({self.tasks_done} done)")
+                    on_event(msg)
                 return
-            tid, instruction = t[1], t[2]
+            task, skills, deps = claimed
+            tid, instruction = task[1], task[2]
             try:
-                result = await self._complete(WORKER_PROMPT, instruction)
+                result = await self._complete(self._system_prompt(), instruction)
             except Exception as e:
-                # no work lost: the claimed task goes back on the board
-                self.space.out("task", tid, instruction, actor=self.name)
+                # no work lost: re-post the task and its routing metadata
+                repost_task(self.space, task, skills, deps, actor=self.name)
                 if on_event:
                     on_event(f"{self.name}: task {tid} failed ({e}); re-posted")
                 return
@@ -111,6 +208,8 @@ class TaskWorker:
                           "context": f"task {tid}",
                           "text": result},
                          actor=self.name)
+            # signal completion so dependent tasks become claimable
+            self.space.out(COMPLETED, tid, None, actor=self.name)
             self.tasks_done += 1
             if on_event:
                 on_event(f"{self.name}: task {tid} → proposal {pid}")
@@ -123,18 +222,20 @@ async def plan(space, *, tid: str, llm, client=None,
     The parent is claimed exactly-once (the take is the arbitration — no
     double-planning); subtasks are written as ``("task", "<tid>.k", text)``
     and attributed to ``actor``. On a failed or degenerate plan the parent
-    is re-posted unchanged and the error re-raises — no work is lost.
-    Returns the subtask ids.
+    is re-posted unchanged (metadata included) and the error re-raises — no
+    work is lost. A successful plan marks the parent completed, so tasks that
+    depend on it become claimable. Returns the subtask ids.
     """
     client = client if client is not None else \
         OpenAICompatibleClient(llm.base_url, api_key=llm.api_key)
-    parent = space.inp("task", tid, None, actor=actor)
-    if parent is None:
+    claimed = claim_task(space, tid, actor=actor)
+    if claimed is None:
         raise ValueError(f"no task {tid!r} on the board")
-    instruction = parent[2]
+    task, skills, deps = claimed
+    instruction = task[2]
 
     def _repost():
-        space.out("task", tid, instruction, actor=actor)  # no work lost
+        repost_task(space, task, skills, deps, actor=actor)
 
     try:
         response = await client.create(
@@ -155,4 +256,5 @@ async def plan(space, *, tid: str, llm, client=None,
     ids = [f"{tid}.{k}" for k in range(1, len(subtasks) + 1)]
     for sid, text in zip(ids, subtasks):
         space.out("task", sid, text, actor=actor)
+    space.out(COMPLETED, tid, None, actor=actor)  # parent handled
     return ids

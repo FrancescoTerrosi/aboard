@@ -268,6 +268,26 @@ class ResetTest(unittest.TestCase):
         finally:
             s.close()
 
+    def test_reset_drains_orchestration_metadata(self):
+        from aboard.models import AGENT, COMPLETED, DEPENDENCY, TASK_SKILL
+        s = TupleSpace(run_root=self.root)
+        s.out(AGENT, "alice", "writer", ["writing"], actor="human")
+        s.out(TASK_SKILL, "t0", "writing", actor="human")
+        s.out(DEPENDENCY, "t1", ["t0"], actor="human")
+        s.out(COMPLETED, "t0", None, actor="human")
+        s.out("task", "t0", "do", actor="human")
+        s.close()
+        s2, _ = open_space(self.root)
+        try:
+            result = reset(s2, actor="human")
+            self.assertEqual(s2.snapshot(), [])
+            self.assertEqual(result["cleared"][AGENT], 1)
+            self.assertEqual(result["cleared"][TASK_SKILL], 1)
+            self.assertEqual(result["cleared"][DEPENDENCY], 1)
+            self.assertEqual(result["cleared"][COMPLETED], 1)
+        finally:
+            s2.close()
+
     def test_reset_is_durable_across_resume(self):
         # THE property: without archiving, the next launch would resurrect
         # the old board (the emptied run is skipped, older runs win)
