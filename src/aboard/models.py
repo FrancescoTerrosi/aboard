@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from typing import NamedTuple
 
 
@@ -66,9 +67,18 @@ RESET_TAGS = frozenset({*TAGS, "chat", "proposal", "config", AGENT,
 
 # Per-process lock serializing id reservation. It makes ``reserve_id`` correct
 # under concurrent in-process writers (threads, the TUI's worker coroutines).
-# Cross-process atomicity relies on the counter tuple's ``inp`` claim; the
-# *seed* step is the remaining cross-process gap (see ``reserve_id``).
+# Cross-process atomicity relies on the counter tuple's ``inp`` claim (atomic
+# on the server); the *seed* step is the remaining cross-process gap (see
+# ``reserve_id`` and ``http_space.HttpSpace._seed_counters``).
 _ID_LOCK = threading.Lock()
+
+# Cross-process retry policy (see ``reserve_id``): when a remote board reports
+# no counter for a tag, the counter is either unseeded or momentarily held by
+# a peer mid-reserve (its ``inp`` landed, its ``out`` has not). We retry briefly
+# before concluding "unseeded" and seeding ourselves. In-process writers are
+# serialized by ``_ID_LOCK``, so absence always means "unseeded" — no retry.
+_RESERVE_RETRIES = 50
+_RESERVE_RETRY_DELAY = 0.005  # seconds
 
 _ID_RE = re.compile(r"^([a-z]+)(\d+)$")
 
@@ -153,23 +163,31 @@ def reserve_id(space, tag: str, prefix: str, *, actor=None) -> str:
     (threads, the TUI's worker coroutines) — the pre-counter read-then-write
     could collide; this cannot.
 
-    **Cross-process note.** The ``inp`` claim is already atomic across
-    processes (the space lock), but the *seed* step is guarded only by the
-    per-process ``_ID_LOCK``. A future ``--endpoint`` (HTTP board) must seed
-    counters in ``open_space`` before the board is shared and, during
-    operation, treat a missing counter as "held" (retry) rather than
-    "unseeded" (seed). That is the remaining step to make id autogen fully
-    cross-process atomic.
+    **Cross-process note.** The ``inp`` claim is atomic across processes
+    (the space lock on the server), so the increment is safe *once the
+    counter exists*. The seed is the remaining gap: ``http_space.HttpSpace``
+    seeds every counter eagerly on connect, so a missing counter during
+    operation means "held by a peer" (its ``inp`` landed, its ``out`` has
+    not) rather than "unseeded". On a remote board we therefore retry a
+    missing counter briefly before falling back to seeding. The residual —
+    two clients' first-ever connection to a brand-new, unseeded server, both
+    inserting as their first op — is avoided by starting the server with
+    ``--recover`` from a seeded board, or connecting once before sharing.
     """
     with _ID_LOCK:
-        counter = space.inp(COUNTER_TAG, tag, None, actor=actor)
-        if counter is None:
-            # No counter: first use (under _ID_LOCK no other in-process writer
-            # can be mid-claim, so absence means "unseeded", not "held").
-            n = _max_index(tag, space.read_all(tag, None, actor=actor)) + 1
-            space.out(COUNTER_TAG, tag, n + 1, actor=actor)
-            return f"{prefix}{n}"
-        n = counter[2]
+        remote = getattr(space, "_remote", False)
+        retries = _RESERVE_RETRIES if remote else 1
+        for _ in range(retries):
+            counter = space.inp(COUNTER_TAG, tag, None, actor=actor)
+            if counter is not None:
+                n = counter[2]
+                space.out(COUNTER_TAG, tag, n + 1, actor=actor)
+                return f"{prefix}{n}"
+            if remote:
+                time.sleep(_RESERVE_RETRY_DELAY)
+        # No counter: first use (in-process, absence means "unseeded" under
+        # _ID_LOCK; remote, retries exhausted so we seed).
+        n = _max_index(tag, space.read_all(tag, None, actor=actor)) + 1
         space.out(COUNTER_TAG, tag, n + 1, actor=actor)
         return f"{prefix}{n}"
 

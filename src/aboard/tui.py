@@ -43,6 +43,7 @@ class DetailPane(VerticalScroll):
 from . import agents, config
 from .board import Board
 from .chat import ChatAgent, LLMConfig, MODES
+from .http_space import HttpSpace
 from .models import COUNTER_TAG, DEPENDENCY, RESET_TAGS, TAGS, TASK_SKILL, fields
 from .proposals import apply, describe, pending, reject
 from .session import load_stock, open_space, prior_runs, reset
@@ -700,8 +701,17 @@ class BoardApp(App):
         the reset persists across restarts: resume skips empty runs, so
         clearing alone would be undone by the next launch. Prior runs land
         under `<runs root>/archive/` — moving one back restores that board.
+
+        On a remote board (``--endpoint``) the server owns the run + WAL, so
+        a client-side reset is refused: clearing the shared board would be a
+        destructive, non-reversible mutation the server would not archive.
         """
         space = self.board.space
+        if getattr(space, "_remote", False):
+            self.notify("reset is disabled on a remote board — the server "
+                        "owns the WAL (restart the server with --recover to "
+                        "reset)", severity="warning")
+            return
         if not self._reset_armed:
             counts = {tag: len(space.read_all(tag, actor=self.human))
                       for tag in sorted(RESET_TAGS)}
@@ -958,7 +968,7 @@ def main() -> None:
     ap.add_argument("--fresh", action="store_true",
                     help="start a new empty board instead of resuming the latest")
     ap.add_argument("--endpoint", default=None,
-                    help="join an existing HTTP board (not yet wired)")
+                    help="join an existing HTTP board (a tuple_space.server URL)")
     ap.add_argument("--name", default="human",
                     help="your participant name (WAL attribution, chat speaker)")
     ap.add_argument("--model", default=LLMConfig.model,
@@ -970,9 +980,17 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.endpoint:
-        raise SystemExit("--endpoint is not yet wired; start an in-process board "
-                         "instead (omit --endpoint).")
-    space, note = open_space(args.run_root, fresh=args.fresh)
+        # Join a shared board: the server owns the run + WAL. In-process
+        # resume/recover (--run-root/--fresh) are client-side and do not apply.
+        if args.fresh or args.run_root:
+            warnings.warn(
+                "--fresh and --run-root are ignored with --endpoint (the "
+                "server owns the board's persistence)", UserWarning,
+                stacklevel=2)
+        space = HttpSpace(args.endpoint)
+        note = f"joined board at {args.endpoint}"
+    else:
+        space, note = open_space(args.run_root, fresh=args.fresh)
     board = Board(space, actor=args.name)   # the human's ops are attributed
 
     # runtime config (chat mode, stock mount) lives in the space — /mode and
@@ -993,7 +1011,8 @@ def main() -> None:
     try:
         app.run()
     finally:
-        # fsync the WAL: the next launch resumes this session's board
+        # in-process: fsync the WAL so the next launch resumes this board;
+        # remote: close the HTTP connection (the server owns the WAL).
         space.close()
 
 

@@ -191,4 +191,30 @@ session persistence (resume on launch, WAL fsync on quit), `/chat` in two
 runtime-switchable modes (human-driven proposals + approval, auto),
 read-only stock mounts, board-scoped config (`/mode`, `/stock`), and task
 execution (`/plan` planner, `/work` workers → proposals) are complete and
-tested. The `--endpoint` (join an HTTP board) mode is the next step.
+tested. Named role-specialized agents, skill routing, and dependency-aware
+workers are complete (Tier 2).
+
+The cross-process board (Tier 3.3 first slice) is wired: `--endpoint <url>`
+joins a shared HTTP board instead of opening an in-process one (see
+“Cross-process board” below). Generic agent panels (3.1) and multi-agent
+patterns (3.2) are the remaining Tier 3 work.
+
+## Cross-process board
+
+`--endpoint <url>` connects a TUI to a `tuple_space.server` instance, so
+multiple TUIs (or the substrate's CLI) share one board over HTTP:
+
+```bash
+python -m tuple_space.server --host 127.0.0.1 --port 8765   # the board
+.venv/bin/aboard --endpoint http://127.0.0.1:8765 --name alice   # participant 1
+.venv/bin/aboard --endpoint http://127.0.0.1:8765 --name bob     # participant 2
+```
+
+A thin `HttpSpace` adapter (stdlib-only) presents the same surface
+`Board`/`config`/`proposals`/`workers` use; each op is one wire dispatch.
+The server owns the run + WAL, so client-side resume/`/reset`/archive are
+disabled in endpoint mode (the server is started with `--recover <run_dir>`
+to resume). Id autogen stays collision-free across clients via the atomic
+counter-claim, with counters seeded on connect. The server routes only the
+Linda primitives; ABoard's one needed extended op (`are_dependencies_met`)
+is recomposed client-side from `dependency` + `completed` tuples.

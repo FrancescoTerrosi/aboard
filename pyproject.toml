@@ -18,6 +18,10 @@ aboard = "aboard.tui:main"
 # The full-screen TUI (textual) is optional, like the substrate's [server]
 # extra. The models/board core is stdlib-only.
 tui = ["textual>=0.60"]
+# Cross-process board (--endpoint) and its tests: the tuple_space HTTP server
+# (fastapi/uvicorn) and the async client dependency (httpx). The runtime
+# HttpSpace adapter itself is stdlib-only (tuple_space.sync_client).
+server = ["fastapi>=0.110", "uvicorn>=0.27", "httpx>=0.27"]
 
 [build-system]
 requires = ["setuptools>=68.0"]

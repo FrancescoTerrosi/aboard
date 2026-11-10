@@ -248,6 +248,7 @@ through a scripted client; TUI flows run under Textual's headless pilot).
 |---|---|---|
 | Chat model | `--model` | `deepseek-v4.1-flash:cloud` (must exist on the endpoint) |
 | Endpoint | `--base-url`, `--api-key` | Ollama `http://127.0.0.1:11434/v1` |
+| Shared board | `--endpoint <url>` (join a `tuple_space.server`) | none (in-process board) |
 | Your name (attribution, chat speaker) | `--name` | `human` |
 | Runs root | `--run-root` or `TUPLE_SPACE_ROOT` | `./.tuplespace/` (per project dir) |
 | Chat mode | `/mode [human\|auto]` (runtime, stored in the board) | `human` |
@@ -282,8 +283,14 @@ through a scripted client; TUI flows run under Textual's headless pilot).
 - **`/stock` mounts 0 items** — wrong path (it must be a runs root, i.e.
   contain run dirs), or the stock board is empty of task/knowledge/skill
   items. Non-curated tags (e.g. chat tuples) are filtered out on load.
-- **`--endpoint` exits with "not yet wired"** — joining a remote HTTP board
-  is the one unwired feature; run an in-process board instead.
+- **`/reset` says "disabled on a remote board"** — you are on a shared
+  HTTP board (`--endpoint`): the server owns the WAL, so a client-side
+  reset would be a non-reversible clear with no archive. Restart the
+  server with `--recover` (or `python -m tuple_space.server --recover
+  <run_dir>`) to reset server-side.
+- **`--endpoint` ignores `--run-root` / `--fresh`** — both are client-side
+  persistence knobs and do not apply when joining a remote board; the
+  server owns persistence. The server warns and proceeds.
 - **`LogInitError`** — the runs root is unwritable; set `TUPLE_SPACE_ROOT`
   or pass `--run-root` pointing somewhere writable.
 - **`error: externally-managed-environment`** — PEP 668; use the venv (§2).

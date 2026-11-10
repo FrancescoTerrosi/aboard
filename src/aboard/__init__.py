@@ -36,11 +36,13 @@ from .models import (
 from . import agents, config
 from .board import Board
 from .chat import ChatAgent, LLMConfig, MODES
+from .http_space import HttpSpace
 from .proposals import ADD, CLAIM, PROPOSAL, apply, describe, pending, reject, submit
 from .session import load_stock, open_space, prior_runs, runs_root
 
 __all__ = [
     "Board",
+    "HttpSpace",
     "config",
     "agents",
     "ChatAgent",
