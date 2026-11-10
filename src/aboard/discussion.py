@@ -45,10 +45,11 @@ class Discussion:
 
     def __init__(self, space, *, a_name: str, b_name: str, llm,
                  topic: str = "", rounds: int = DEFAULT_ROUNDS,
-                 client_a=None, client_b=None):
+                 actor: str | None = None, client_a=None, client_b=None):
         self.space = space
         self.topic = topic
         self.rounds = max(1, rounds)
+        self.actor = actor
         self.a = GenericAgent(space, name=a_name, role="discussant", llm=llm,
                               system_prompt=DISCUSSANT_PROMPT, client=client_a)
         self.b = GenericAgent(space, name=b_name, role="discussant", llm=llm,
@@ -61,7 +62,10 @@ class Discussion:
         self.b.stop()
 
     def _recent(self, name: str, n: int = 3) -> list[str]:
-        return [t[2] for t in self.space.read_all(AGENT_TURN, name, None)][-n:]
+        # The driver's context reads are attributed to the discussion's actor
+        # (the human who started it), matching every other read in ABoard.
+        return [t[2] for t in self.space.read_all(AGENT_TURN, name, None,
+                                                  actor=self.actor)][-n:]
 
     def _context(self, agent: GenericAgent, other: GenericAgent) -> str:
         """Build one turn's context: topic (opening) or the other's words."""

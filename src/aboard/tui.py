@@ -720,7 +720,8 @@ class BoardApp(App):
                         severity="error")
             return
         d = Discussion(self.board.space, a_name=name1, b_name=name2,
-                       llm=self.llm or LLMConfig(), topic=topic)
+                       llm=self.llm or LLMConfig(), topic=topic,
+                       actor=self.human)
         self._llm_agents[name1] = d.a
         self._llm_agents[name2] = d.b
         self._discussions.append(d)

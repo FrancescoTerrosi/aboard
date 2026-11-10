@@ -688,11 +688,13 @@ class TuiSmokeTest(unittest.TestCase):
 
                 class FakeDiscussion:
                     def __init__(self, space, *, a_name, b_name, llm,
-                                 topic="", rounds=3, client_a=None, client_b=None):
+                                 topic="", rounds=3, actor=None,
+                                 client_a=None, client_b=None):
                         self.space = space
                         self.a = FakeAgent(a_name)
                         self.b = FakeAgent(b_name)
                         self.topic = topic
+                        self.actor = actor
                     def stop(self):
                         self.a.stop()
                         self.b.stop()

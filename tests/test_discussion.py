@@ -6,6 +6,7 @@ turn / budget. No network — both agents' clients are scripted.
 """
 
 import asyncio
+import json
 import tempfile
 import unittest
 
@@ -25,6 +26,24 @@ class DiscussionTest(unittest.TestCase):
     def tearDown(self):
         self.space.close()
         self._tmp.cleanup()
+
+    def _records(self):
+        self.space.flush_log()
+        with open(self.space.ops_jsonl_path) as f:
+            return [json.loads(l) for l in f if l.strip()]
+
+    def test_driver_reads_are_actor_attributed(self):
+        ca = ScriptedClient(completion("A1"))
+        cb = ScriptedClient(completion("B1"))
+        d = Discussion(self.space, a_name="alice", b_name="bob", llm=self.llm,
+                       topic="topic", rounds=1, actor="human",
+                       client_a=ca, client_b=cb)
+        asyncio.run(d.run())
+        reads = [r for r in self._records()
+                 if r["kind"] == "read" and r["op"] == "READ_ALL"]
+        # every context-building read is attributed to the discussion's actor
+        self.assertTrue(reads)
+        self.assertTrue(all(r["actor"] == "human" for r in reads))
 
     def test_alternates_turns_and_records_interleaved_transcript(self):
         ca = ScriptedClient(completion("A thinks X"), completion("A agrees"))
