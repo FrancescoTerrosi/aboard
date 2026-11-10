@@ -1,0 +1,24 @@
+[project]
+name = "aboard"
+version = "0.1.0"
+description = "Agents Board (ABoard) — a professional TUI to navigate a tuple space of knowledge and skills shared between humans and agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # The generic tuple-space substrate (installed from its own repo; not on
+    # PyPI yet). ABoard layers knowledge/skill templates on top of it and
+    # never modifies it.
+    "tuple-space>=0.4.0",
+]
+
+[project.scripts]
+aboard = "aboard.tui:main"
+
+[project.optional-dependencies]
+# The full-screen TUI (textual) is optional, like the substrate's [server]
+# extra. The models/board core is stdlib-only.
+tui = ["textual>=0.60"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
