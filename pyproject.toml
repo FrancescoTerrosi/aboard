@@ -3,7 +3,11 @@ name = "aboard"
 version = "0.1.0"
 description = "Agents Board (ABoard) — a professional TUI to navigate a tuple space of knowledge and skills shared between humans and agents"
 readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.10"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+]
 dependencies = [
     # The generic tuple-space substrate (installed from its own repo; not on
     # PyPI yet). ABoard layers knowledge/skill templates on top of it and

@@ -285,3 +285,8 @@ agents (`/spawn`) therefore need an in-process board — the substrate's
 not route — so `/spawn` is refused with `--endpoint`. Workers, the reviewer,
 and the discussion sandbox work over the wire because they use only the
 Linda primitives.
+
+## License
+
+MIT — see [`LICENSE`](./LICENSE). Contributions to this repository are
+accepted under the same license.
