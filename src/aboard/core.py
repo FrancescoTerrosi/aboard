@@ -255,12 +255,24 @@ class BoardService:
 
     def files_snapshot(self) -> dict:
         space = self.space
+        projects = space.read_all(PROJECT, None, None, actor=self.human)
+        created = space.read_all(FILE_CREATED, None, None, None,
+                                 actor=self.human)
+        errors = space.read_all(FILE_ERROR, None, None, None,
+                                actor=self.human)
+        # file_created is an append-only event log; for the manifest view we
+        # collapse to the latest record per relative path (an overwrite must
+        # not look like two separate files).
+        latest_files: dict[str, tuple] = {}
+        for f in created:
+            latest_files[f[1]] = f
+        latest_errors: dict[str, tuple] = {}
+        for e in errors:
+            latest_errors[e[1]] = e
         return {
-            "projects": space.read_all(PROJECT, None, None, actor=self.human),
-            "files": space.read_all(FILE_CREATED, None, None, None,
-                                    actor=self.human),
-            "errors": space.read_all(FILE_ERROR, None, None, None,
-                                     actor=self.human),
+            "projects": projects,
+            "files": sorted(latest_files.values(), key=lambda t: t[1]),
+            "errors": sorted(latest_errors.values(), key=lambda t: t[1]),
         }
 
     def help_snapshot(self) -> dict:
