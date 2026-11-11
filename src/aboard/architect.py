@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 
-from tuple_space import LLMAgent
+from tuple_space import BudgetExceeded, LLMAgent
 
 from .board import board_view
 from .models import ARCHITECT, PROJECT
@@ -32,6 +32,10 @@ __all__ = ["ArchitectAgent", "ARCHITECT_PROMPT", "ALLOWED_TOOLS"]
 # Bounds — keep the conversation chat-sized.
 HISTORY_TURNS = 12
 TURN_TEXT_MAX = 4000
+BOARD_PER_TAG = 4
+BOARD_FIELD_LIMIT = 200
+READ_FIELD_LIMIT = 300
+READ_RESULT_MAX = 20
 
 ARCHITECT_PROMPT = (
     "You are an architect agent on a shared board, chatting with a human. "
@@ -113,6 +117,7 @@ class ArchitectAgent:
         self.skills = list(skills or [])
         self.sandbox = sandbox
         self.turns = 0
+        self._registered = False
 
         self._agent = LLMAgent(
             name, role, space=space, model=llm.model,
@@ -144,6 +149,16 @@ class ArchitectAgent:
         if space.rdp(PROJECT, name, None, actor=name) is None:
             space.out(PROJECT, name, sandbox, actor=name)
 
+        # Restore budget state from the space so reopening a named architect
+        # does not silently reset its token allowance. The substrate's agent
+        # keeps this in memory; we rehydrate it from the recorded budget.
+        prior = space.read_all("budget", name, None, None, None, actor=name)
+        if prior:
+            last = prior[-1]
+            self._agent.tokens_used = last[2]
+            if last[2] > last[4]:
+                self._agent._budget_exceeded = True
+
     # ── the space is the memory ────────────────────────────────────────
 
     @property
@@ -162,6 +177,41 @@ class ArchitectAgent:
     def write_turn(self, speaker: str, text: str):
         self.space.out(ARCHITECT, self.name, speaker, text, actor=speaker)
 
+    # ── bounded raw reads ─────────────────────────────────────────────
+
+    @staticmethod
+    def _format_tuple(t: tuple, field_limit: int | None = None) -> str:
+        def field(v):
+            if field_limit is not None and isinstance(v, str) \
+                    and len(v) > field_limit:
+                return v[:field_limit] + "…"
+            return v
+        return ", ".join(repr(field(v)) for v in t)
+
+    def _execute_read(self, name: str, args: dict) -> str:
+        """Execute rdp/read_all with bounded field sizes.
+
+        Targeted ``rdp`` stays full (the model asked for a specific tuple);
+        broad ``read_all`` truncates each field so a full-space scan cannot
+        blow the context window.
+        """
+        template = tuple(self._agent._normalize_template(v)
+                         for v in args.get("template", []))
+        if name == "rdp":
+            result = self.space.rdp(*template, actor=self.name)
+            return self._format_tuple(result) if result is not None else "null"
+        results = self.space.read_all(*template, actor=self.name)
+        if not results:
+            return "0 tuples"
+        if len(results) <= READ_RESULT_MAX:
+            preview = "; ".join(self._format_tuple(t, READ_FIELD_LIMIT)
+                                for t in results)
+            return f"{len(results)} tuples: {preview}"
+        preview = "; ".join(self._format_tuple(t, READ_FIELD_LIMIT)
+                            for t in results[:READ_RESULT_MAX])
+        return (f"{len(results)} tuples (showing first {READ_RESULT_MAX}): "
+                f"{preview}; ...")
+
     # ── context building ────────────────────────────────────────────────
 
     def _messages(self) -> list[dict]:
@@ -178,16 +228,46 @@ class ArchitectAgent:
         # state before deciding what to navigate with its raw tuple tools
         if msgs[-1]["role"] == "user":
             msgs[-1]["content"] += "\n\n[current board]\n" + \
-                board_view(self.space, actor=self.name)
+                board_view(self.space, actor=self.name, per_tag=BOARD_PER_TAG,
+                           field_limit=BOARD_FIELD_LIMIT)
         return msgs
 
     # ── the protocol ────────────────────────────────────────────────────
 
+    def _ensure_registered(self) -> None:
+        """Publish capabilities and the initial budget once per name.
+
+        The substrate's ``LLMAgent`` would re-publish an initial budget on
+        every new instance, so a resumed architect would accumulate duplicate
+        budget tuples. We only publish what the space does not already have.
+        """
+        if self._registered:
+            return
+        space = self.space
+        if self.skills and not space.read_all("capability", self.name, None,
+                                              actor=self.name):
+            space.out_capability(self.name, self.skills)
+        if not space.read_all("budget", self.name, None, None, None,
+                              actor=self.name):
+            space.out_budget(self.name, 0, self._agent.token_budget,
+                             self._agent.token_budget)
+        self._registered = True
+
     async def send(self, text: str, *, max_tool_rounds: int = 3) -> dict:
         """One conversational turn. Writes the human turn, then the
-        architect's reply when the model produced prose."""
+        architect's reply when the model produced prose.
+
+        Budget enforcement is at the turn boundary: if a previous turn crossed
+        the budget, this entry raises before the human turn is written or any
+        API call is made.
+        """
+        if self._agent._budget_exceeded:
+            raise BudgetExceeded(
+                f"architect {self.name} exceeded token budget: "
+                f"{self._agent.tokens_used:,} / {self._agent.token_budget:,}"
+            )
         self.write_turn(self.human, text)
-        await self._agent._ensure_registered()
+        self._ensure_registered()
         messages = self._messages()
         tools = self._agent._tools
 
@@ -200,6 +280,7 @@ class ArchitectAgent:
         message = response.choices[0].message
 
         tool_notes: list[str] = []
+        file_notes: list[str] = []
         for _ in range(max_tool_rounds):
             if not message.tool_calls:
                 break
@@ -213,14 +294,18 @@ class ArchitectAgent:
                     content = f"error: malformed arguments: {e}"
                     results.append({"role": "tool", "tool_call_id": tc.id,
                                     "content": content})
-                    tool_notes.append(content)
                     continue
                 try:
-                    content = await self._agent._execute_in_process(
-                        tc.function.name, args)
+                    if tc.function.name in ("rdp", "read_all"):
+                        content = self._execute_read(tc.function.name, args)
+                    else:
+                        content = await self._agent._execute_in_process(
+                            tc.function.name, args)
                 except Exception as e:  # keep the turn alive on tool failures
                     content = f"error: {e}"
                 tool_notes.append(content)
+                if tc.function.name in ("create_file", "scaffold_files"):
+                    file_notes.append(content)
                 results.append({"role": "tool", "tool_call_id": tc.id,
                                 "content": content})
             messages.append(message.to_dict())
@@ -234,13 +319,15 @@ class ArchitectAgent:
             message = response.choices[0].message
 
         reply = message.content or ""
-        if not reply and tool_notes:
+        if not reply and file_notes:
             # A tool-calls-only final message has no prose; without a fallback
             # the transcript would show the human's turn with no architect
-            # response. Summarize the tool results so the UI (and a resumed
-            # board) still has a complete, readable turn.
-            shown = [f"- {_clip(note)}" for note in tool_notes[-6:]]
-            reply = "I used my tools:\n" + "\n".join(shown)
+            # response. List the files actually produced rather than dumping
+            # every board read.
+            shown = [f"- {_clip(note)}" for note in file_notes[-6:]]
+            reply = "I created files:\n" + "\n".join(shown)
+        elif not reply and tool_notes:
+            reply = "I inspected the board with my tools."
         if reply:
             # a tool-calls-only final message is not a real prose turn; only
             # prose (or the fallback summary above) is recorded — the space is

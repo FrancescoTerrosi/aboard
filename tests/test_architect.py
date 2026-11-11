@@ -12,7 +12,7 @@ import os
 import tempfile
 import unittest
 
-from tuple_space import TupleSpace
+from tuple_space import BudgetExceeded, TupleSpace
 from tuple_space.llm_client import FunctionCall, ToolCall
 
 from aboard.architect import ArchitectAgent
@@ -123,6 +123,51 @@ class ArchitectAgentTest(unittest.TestCase):
         self.assertIn("create_file", prompt)
         # the substrate's autonomous coordination instructions are replaced
         self.assertNotIn("claim tasks", prompt)
+
+    def test_budget_exceeded_refuses_next_turn_before_writing_it(self):
+        a = ArchitectAgent(self.space, name="arch", role="builder",
+                           llm=LLMConfig(model="test-model", token_budget=500),
+                           sandbox=self.sandbox,
+                           client=ScriptedClient(completion(content="hi",
+                                                            total=600)))
+        asyncio.run(a.send("first"))
+        with self.assertRaises(BudgetExceeded):
+            asyncio.run(a.send("second"))
+        # the refused turn was not written; the transcript stays complete
+        self.assertEqual(self.space.read_all(ARCHITECT, "arch", None, None),
+                         [("architect", "arch", "human", "first"),
+                          ("architect", "arch", "arch", "hi")])
+
+    def test_budget_state_is_restored_on_reopen(self):
+        llm = LLMConfig(model="test-model", token_budget=500)
+        a = ArchitectAgent(self.space, name="arch", role="builder", llm=llm,
+                           sandbox=self.sandbox,
+                           client=ScriptedClient(completion(content="hi",
+                                                            total=600)))
+        asyncio.run(a.send("first"))
+        # a fresh instance for the same name resumes the spent budget
+        b = ArchitectAgent(self.space, name="arch", role="builder", llm=llm,
+                           sandbox=self.sandbox,
+                           client=ScriptedClient(completion(content="no")))
+        self.assertEqual(b.tokens_used, 600)
+        self.assertTrue(b._agent._budget_exceeded)
+        with self.assertRaises(BudgetExceeded):
+            asyncio.run(b.send("second"))
+
+    def test_read_all_is_field_bounded_but_rdp_is_full(self):
+        self.space.out("knowledge", "know0", "n", "ctx", "x" * 1000,
+                      actor="human")
+        a = ArchitectAgent(self.space, name="arch", role="builder",
+                           llm=self.llm, sandbox=self.sandbox)
+        broad = a._execute_read("read_all",
+                                {"template": ["knowledge", None, None,
+                                              None, None]})
+        self.assertIn("…", broad)
+        self.assertLess(len(broad), 1200)
+        targeted = a._execute_read("rdp",
+                                   {"template": ["knowledge", "know0", None,
+                                                 None, None]})
+        self.assertIn("x" * 1000, targeted)
 
     def test_malformed_tool_call_does_not_abort_the_turn(self):
         client = ScriptedClient(

@@ -25,30 +25,42 @@ from .models import (
 
 
 def format_tuples(tuples: list, limit: int = 20,
-                  total: Optional[int] = None) -> str:
+                  total: Optional[int] = None,
+                  field_limit: Optional[int] = None) -> str:
     """Render tuples for the model, repr-quoted so field boundaries are
     unambiguous even when content contains commas.
 
     ``total`` is the true number of matching tuples when ``tuples`` is a
-    bounded slice; it defaults to ``len(tuples)``.
+    bounded slice; it defaults to ``len(tuples)``. ``field_limit`` optionally
+    truncates long string fields (for bounded agent context).
     """
     if not tuples:
         return "0 items"
     shown = tuples[:limit]
     total = len(tuples) if total is None else total
-    text = "; ".join(", ".join(repr(v) for v in t) for t in shown)
+
+    def field(v):
+        if field_limit is not None and isinstance(v, str) \
+                and len(v) > field_limit:
+            return v[:field_limit] + "…"
+        return v
+
+    text = "; ".join(", ".join(repr(field(v)) for v in t) for t in shown)
     more = f"; … (+{total - len(shown)} more)" if total > len(shown) else ""
     return f"{total} items: {text}{more}"
 
 
 def board_view(space, *, actor=None, per_tag: int = 8,
-               newest_first: bool = True) -> str:
+               newest_first: bool = True,
+               field_limit: Optional[int] = None) -> str:
     """A bounded snapshot of the curated board, injected as agent context.
 
     Reads at most ``per_tag`` tuples per tag (``read_all(limit=…)``) and
     reports the true total via ``count`` — so the read itself is bounded,
     not merely the rendered string. ``newest_first`` returns the most recent
     matches first (LIFO); set it ``False`` for insertion order.
+    ``field_limit`` optionally truncates long string fields in the rendered
+    snapshot.
     """
     lines = []
     for tag in TAGS:
@@ -60,7 +72,8 @@ def board_view(space, *, actor=None, per_tag: int = 8,
         tuples = space.read_all(*template, actor=actor,
                                 limit=per_tag, reverse=newest_first)
         lines.append(f"{tag}: "
-                     f"{format_tuples(tuples, limit=per_tag, total=total)}")
+                     f"{format_tuples(tuples, limit=per_tag, total=total,
+                                      field_limit=field_limit)}")
     return "\n".join(lines)
 
 
