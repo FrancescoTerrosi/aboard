@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ABoard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">ABoard</div>
+    <nav class="views">
+      <button data-view="board" class="active">Board</button>
+      <button data-view="proposals">Proposals</button>
+      <button data-view="status">Status</button>
+      <button data-view="chat">Chat</button>
+      <button data-view="architect">Architect</button>
+      <button data-view="files">Files</button>
+      <button data-view="tuples">Tuples</button>
+    </nav>
+    <div id="subtitle" class="subtitle"></div>
+  </header>
+
+  <main class="layout">
+    <section class="board-pane" id="board-pane">
+      <div class="tabs" id="tabs">
+        <button data-tag="task" class="active">task</button>
+        <button data-tag="knowledge">knowledge</button>
+        <button data-tag="skill">skill</button>
+      </div>
+      <input id="filter" class="filter" placeholder="filter…">
+      <div id="items" class="items"></div>
+    </section>
+
+    <section class="detail-pane" id="detail-pane">
+      <div id="detail" class="detail"></div>
+    </section>
+  </main>
+
+  <footer class="commandbar">
+    <form id="command-form" autocomplete="off">
+      <input id="command" placeholder="/help · /add task … · /chat hello">
+      <button type="submit">Run</button>
+    </form>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
