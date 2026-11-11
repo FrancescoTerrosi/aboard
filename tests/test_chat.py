@@ -7,7 +7,7 @@ the design claims:
 - writes go through the curated Board (templates enforced, ids autogen);
 - every mutation is attributed in the WAL (human turns vs agent ops);
 - history is rebuilt from the space (a resumed board resumes the chat);
-- cost control raises at the next send after crossing the budget.
+- cost is tracked and reported, never enforced (no hard chat budget cap).
 """
 
 import asyncio
@@ -15,7 +15,7 @@ import json
 import tempfile
 import unittest
 
-from tuple_space import BudgetExceeded, TupleSpace
+from tuple_space import TupleSpace
 
 from aboard.chat import (MODES, ChatAgent, LLMConfig,
                          _auto_tool_schema, _human_tool_schema,
@@ -116,11 +116,23 @@ class ChatAgentTestCase(unittest.TestCase):
     def test_tool_schema_is_curated_only(self):
         # reads are identical in both modes; no raw Linda primitives anywhere
         reads = {t["function"]["name"] for t in _read_tool_schema()}
-        self.assertEqual(reads, {"board_list", "board_get", "board_search"})
+        self.assertEqual(reads, {"board_list", "board_get", "board_search",
+                                 "agent_turns"})
         for mode in MODES:
             for t in _tool_schema(mode, None):
                 params = t["function"]["parameters"]["properties"]
                 self.assertNotIn("fields", params)  # no raw out() escape hatch
+
+    def test_agent_turns_tool_reads_the_transcript(self):
+        self.space.out("agent_turn", "alice", "hello", actor="alice")
+        self.space.out("agent_turn", "bob", "hi", actor="bob")
+        agent = ChatAgent(self.space)
+        result = asyncio.run(agent._execute("agent_turns", {}))
+        self.assertIn("alice: hello", result)
+        self.assertIn("bob: hi", result)
+        # bounded: limit clamps to the most recent turns
+        self.assertEqual(asyncio.run(agent._execute("agent_turns", {"limit": 1})),
+                         "bob: hi")
 
     def test_mode_schemas_split_write_access(self):
         human = {t["function"]["name"] for t in _tool_schema("human", None)}
@@ -155,17 +167,18 @@ class ChatAgentTestCase(unittest.TestCase):
         self.assertIn(("OUT", "assistant"), by_args)    # agent's board_add + reply
         self.assertNotIn(("OUT", None), by_args)       # zero unattributed writes
 
-    # ── cost control ───────────────────────────────────────────────────
+    # ── cost tracking (no hard cap) ──────────────────────────────────
 
-    def test_budget_exceeded_raises_at_next_send(self):
-        client = ScriptedClient(completion(total=600))
+    def test_chat_has_no_hard_budget_cap(self):
+        client = ScriptedClient(completion(total=600),
+                                completion(total=600))
         agent = ChatAgent(self.space, client=client,
                           llm=LLMConfig(token_budget=500))
-        asyncio.run(agent.send("first"))      # crossing send completes (600 > 500)
-        with self.assertRaises(BudgetExceeded) as ctx:
-            asyncio.run(agent.send("second"))  # refused before any API call
-        self.assertIn("exceeded token budget", str(ctx.exception))
-        self.assertEqual(len(client.calls), 1)   # no second API call happened
+        first = asyncio.run(agent.send("first"))
+        second = asyncio.run(agent.send("second"))
+        self.assertEqual(first["tokens_used"], 600)
+        self.assertEqual(second["tokens_used"], 1200)  # keeps accumulating
+        self.assertEqual(len(client.calls), 2)          # both sends went through
 
     # ── unreachable endpoint (the TUI shows this as an error toast) ────
 

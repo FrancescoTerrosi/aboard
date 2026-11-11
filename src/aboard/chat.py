@@ -22,13 +22,14 @@ The wiring, in one place:
 - **The space is the memory.** Every turn is a ``("chat", speaker, text)``
   tuple; history is rebuilt from the space on each send, so a resumed board
   also resumes the conversation. Pending proposals are mutations too and
-  survive restarts.
+  survive restarts. Agent/discussion turns are the separate ``agent_turn``
+  transcript, readable through the ``agent_turns`` tool.
 - **Attribution.** The agent's ops carry ``actor=<agent name>`` in the WAL;
   the human's carry ``actor=<human name>``. Proposals record the full story:
   agent proposed at seq N, human decided at seq M.
-- **Cost control.** Crossing ``token_budget`` raises
-  :class:`~tuple_space.BudgetExceeded` at the *next* send (the crossing send
-  completes — the substrate's step-boundary rule).
+- **Cost tracking.** ``tokens_used`` accumulates across turns and is reported
+  after each send. Chat has **no hard budget cap** — the conversation never
+  blocks on cost.
 """
 
 from __future__ import annotations
@@ -37,11 +38,10 @@ import json
 from dataclasses import dataclass
 from typing import Optional
 
-from tuple_space import BudgetExceeded
 from tuple_space.llm_client import OpenAICompatibleClient
 
 from .board import Board, board_view, format_tuples
-from .models import TAGS, TAG_SPECS, fields
+from .models import AGENT_TURN, TAGS, TAG_SPECS, fields
 from .proposals import describe, pending, submit
 
 __all__ = ["ChatAgent", "LLMConfig", "MODES"]
@@ -74,6 +74,7 @@ The board holds three kinds of items (tags), each with fixed fields:
 - {FIELDS_HELP}
 
 Use the board_* tools for every read and write; ids are auto-generated.
+Use agent_turns to read the recorded agent/discussion transcript.
 Prefer searching before adding, to avoid duplicates.
 Be concise. Your chat replies are stored on the board verbatim."""
 
@@ -127,6 +128,12 @@ def _read_tool_schema() -> list[dict]:
                         "description": "field name → exact value to lock "
                                        "(optional; all wildcards if omitted)"}},
             ["tag"]),
+        _fn("agent_turns",
+            "List recent agent/discussion turns recorded on the board "
+            "(the agent_turn transcript).",
+            {"limit": {"type": "integer",
+                       "description": "Max turns to show (default 20)."}},
+            []),
     ]
 
 
@@ -219,7 +226,6 @@ class ChatAgent:
             OpenAICompatibleClient(self.llm.base_url, api_key=self.llm.api_key)
         self.tokens_used = 0
         self.api_calls = 0
-        self._budget_exceeded = False
 
     # ── the space is the memory ────────────────────────────────────────
 
@@ -289,10 +295,18 @@ class ChatAgent:
                              args.get("values", {}), actor=self.name)
                 return f"proposed: {pid} — pending the human's approval (/approve {pid})"
             if name == "board_proposals":
-                ps = pending(self.space)
+                ps = pending(self.space, actor=self.name)
                 if not ps:
                     return "no pending proposals"
                 return "; ".join(describe(t) for t in ps[:TOOL_RESULT_MAX])
+            if name == "agent_turns":
+                turns = self.space.read_all(AGENT_TURN, None, None,
+                                            actor=self.name)
+                limit = int(args.get("limit", TOOL_RESULT_MAX) or TOOL_RESULT_MAX)
+                recent = turns[-limit:] if limit > 0 else []
+                if not recent:
+                    return "no agent turns recorded"
+                return "\n".join(f"{t[1]}: {t[2]}" for t in recent)
             if name == "stock_list":
                 return format_tuples(self._stock_find(args["tag"]))
             if name == "stock_search":
@@ -305,19 +319,13 @@ class ChatAgent:
     # ── the protocol ────────────────────────────────────────────────────
 
     def _update_tokens(self, usage) -> None:
-        """Accumulate usage; cross → raise at the NEXT send (the crossing
-        send completes, mirroring the substrate's step-boundary rule)."""
+        """Accumulate usage for reporting; no hard cap is enforced."""
         self.tokens_used += getattr(usage, "total_tokens", 0)
-        if self.tokens_used > self.llm.token_budget:
-            self._budget_exceeded = True
 
     async def send(self, text: str, *, max_tool_rounds: int = 3) -> dict:
-        """One conversational turn. Writes both tuples (human, then reply)."""
-        if self._budget_exceeded:
-            raise BudgetExceeded(
-                f"chat agent {self.name} exceeded token budget: "
-                f"{self.tokens_used:,} / {self.llm.token_budget:,}"
-            )
+        """One conversational turn. Writes the human turn, then the agent's
+        reply when the model produced prose (a tool-calls-only final message
+        is not recorded as a turn)."""
         self.write_turn(self.human, text)
         messages = self._messages()
         tools = _tool_schema(self.mode, self.stock)
@@ -335,9 +343,20 @@ class ChatAgent:
                 break
             results = []
             for tc in message.tool_calls:
-                args = json.loads(tc.function.arguments)
+                try:
+                    args = json.loads(tc.function.arguments)
+                except (TypeError, ValueError) as e:
+                    # a malformed tool call must not abort the turn: feed the
+                    # error back as a tool result so the model can recover
+                    results.append({"role": "tool", "tool_call_id": tc.id,
+                                    "content": f"error: malformed arguments: {e}"})
+                    continue
+                try:
+                    content = await self._execute(tc.function.name, args)
+                except Exception as e:  # keep the turn alive on tool failures
+                    content = f"error: {e}"
                 results.append({"role": "tool", "tool_call_id": tc.id,
-                                "content": await self._execute(tc.function.name, args)})
+                                "content": content})
             messages.append(message.to_dict())
             messages.extend(results)
             response = await self.client.create(
@@ -348,7 +367,10 @@ class ChatAgent:
             self._update_tokens(response.usage)
             message = response.choices[0].message
 
-        reply = message.content or "(tool calls only)"
-        self.write_turn(self.name, reply)
+        reply = message.content or ""
+        if reply:
+            # a tool-calls-only final message is not a real prose turn; only
+            # prose is recorded in the transcript (the space is the memory)
+            self.write_turn(self.name, reply)
         return {"reply": reply, "tokens_used": self.tokens_used,
                 "api_calls": self.api_calls}
