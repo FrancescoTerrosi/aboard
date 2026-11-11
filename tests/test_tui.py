@@ -19,6 +19,7 @@ from aboard.board import Board
 from aboard.chat import ChatAgent
 from aboard.session import load_stock, open_space
 from aboard.tui import BoardApp
+import aboard.core as core_mod
 from tests_support import completion, call, ScriptedClient
 
 
@@ -471,9 +472,9 @@ class TuiSmokeTest(unittest.TestCase):
                         space.out("task", f"{tid}.2", "implement", actor=actor)
                         return [f"{tid}.1", f"{tid}.2"]
                     import aboard.tui as tui_mod
-                    orig_plan = tui_mod.plan
-                    tui_mod.plan = fake_plan
-                    orig_worker_cls = tui_mod.TaskWorker
+                    orig_plan = core_mod.plan
+                    core_mod.plan = fake_plan
+                    orig_worker_cls = core_mod.TaskWorker
                     class FakeTaskWorker:
                         def __init__(self, space, *, name, llm):
                             self.space = space
@@ -494,7 +495,7 @@ class TuiSmokeTest(unittest.TestCase):
                             if on_event:
                                 on_event(f"{self.name}: task {t[1]} → proposal p0")
                             self.tasks_done += 1
-                    tui_mod.TaskWorker = FakeTaskWorker
+                    core_mod.TaskWorker = FakeTaskWorker
                     try:
                         app._run_command("/plan")   # highlighted row (t0)
                         for _ in range(20):
@@ -520,8 +521,8 @@ class TuiSmokeTest(unittest.TestCase):
                         app._run_command("/stop")
                         await pilot.pause()
                     finally:
-                        tui_mod.plan = orig_plan
-                        tui_mod.TaskWorker = orig_worker_cls
+                        core_mod.plan = orig_plan
+                        core_mod.TaskWorker = orig_worker_cls
                 space.close()
         asyncio.run(run())
 
@@ -535,7 +536,7 @@ class TuiSmokeTest(unittest.TestCase):
                 board = Board(space, actor="human")
                 app = BoardApp(board=board, human="human")
                 import aboard.tui as tui_mod
-                orig = tui_mod.TaskWorker
+                orig = core_mod.TaskWorker
 
                 class FakeWorker:
                     def __init__(self, space, *, name, llm,
@@ -554,7 +555,7 @@ class TuiSmokeTest(unittest.TestCase):
                         while not self._stopped:
                             await asyncio.sleep(0.01)
 
-                tui_mod.TaskWorker = FakeWorker
+                core_mod.TaskWorker = FakeWorker
                 try:
                     async with app.run_test() as pilot:
                         await pilot.pause()
@@ -579,7 +580,7 @@ class TuiSmokeTest(unittest.TestCase):
                         await pilot.pause()
                         self.assertNotIn("alice", app._task_workers)
                 finally:
-                    tui_mod.TaskWorker = orig
+                    core_mod.TaskWorker = orig
                 space.close()
         asyncio.run(run())
 
@@ -636,7 +637,7 @@ class TuiSmokeTest(unittest.TestCase):
                 board = Board(space, actor="human")
                 app = BoardApp(board=board, human="human")
                 import aboard.tui as tui_mod
-                orig = tui_mod.TaskWorker
+                orig = core_mod.TaskWorker
 
                 class FakeWorker:
                     def __init__(self, space, *, name, llm,
@@ -655,7 +656,7 @@ class TuiSmokeTest(unittest.TestCase):
                         while not self._stopped:
                             await asyncio.sleep(0.01)
 
-                tui_mod.TaskWorker = FakeWorker
+                core_mod.TaskWorker = FakeWorker
                 try:
                     async with app.run_test() as pilot:
                         await pilot.pause()
@@ -672,7 +673,7 @@ class TuiSmokeTest(unittest.TestCase):
                         self.assertNotIn("w0", app._task_workers)  # released
                         self.assertIn("w1", app._task_workers)     # still live
                 finally:
-                    tui_mod.TaskWorker = orig
+                    core_mod.TaskWorker = orig
                 space.close()
         asyncio.run(run())
 
@@ -685,8 +686,8 @@ class TuiSmokeTest(unittest.TestCase):
                 board = Board(space, actor="human")
                 app = BoardApp(board=board, human="human")
                 import aboard.tui as tui_mod
-                orig_generic = tui_mod.GenericAgent
-                orig_review = tui_mod.review
+                orig_generic = core_mod.GenericAgent
+                orig_review = core_mod.review
 
                 class FakeGeneric:
                     def __init__(self, space, *, name, role, llm,
@@ -713,8 +714,8 @@ class TuiSmokeTest(unittest.TestCase):
                                       client=None):
                     return ["p0: approve — ok"]
 
-                tui_mod.GenericAgent = FakeGeneric
-                tui_mod.review = fake_review
+                core_mod.GenericAgent = FakeGeneric
+                core_mod.review = fake_review
                 toasts = []
                 app.notify = lambda msg, **kw: toasts.append(msg)
                 try:
@@ -746,8 +747,8 @@ class TuiSmokeTest(unittest.TestCase):
                         self.assertTrue(alice._stopped)
                         self.assertNotIn("alice", app._llm_agents)
                 finally:
-                    tui_mod.GenericAgent = orig_generic
-                    tui_mod.review = orig_review
+                    core_mod.GenericAgent = orig_generic
+                    core_mod.review = orig_review
                 space.close()
         asyncio.run(run())
 
@@ -760,7 +761,7 @@ class TuiSmokeTest(unittest.TestCase):
                 board = Board(space, actor="human")
                 app = BoardApp(board=board, human="human")
                 import aboard.tui as tui_mod
-                orig = tui_mod.ArchitectAgent
+                orig = core_mod.ArchitectAgent
 
                 class FakeArchitect:
                     def __init__(self, space, *, name, role, human, llm,
@@ -786,7 +787,7 @@ class TuiSmokeTest(unittest.TestCase):
                         return {"reply": "ok", "tokens_used": 7,
                                 "api_calls": 1}
 
-                tui_mod.ArchitectAgent = FakeArchitect
+                core_mod.ArchitectAgent = FakeArchitect
                 toasts = []
                 app.notify = lambda msg, **kw: toasts.append(msg)
                 try:
@@ -832,7 +833,7 @@ class TuiSmokeTest(unittest.TestCase):
                         self.assertIn("README.md", md)
                         self.assertIn("12 bytes", md)
                 finally:
-                    tui_mod.ArchitectAgent = orig
+                    core_mod.ArchitectAgent = orig
                 space.close()
         asyncio.run(run())
 
@@ -846,7 +847,7 @@ class TuiSmokeTest(unittest.TestCase):
                 board = Board(space, actor="human")
                 app = BoardApp(board=board, human="human")
                 import aboard.tui as tui_mod
-                orig = tui_mod.Discussion
+                orig = core_mod.Discussion
 
                 class FakeAgent:
                     def __init__(self, name):
@@ -884,7 +885,7 @@ class TuiSmokeTest(unittest.TestCase):
                         while not (self.a._stopped or self.b._stopped):
                             await asyncio.sleep(0.01)
 
-                tui_mod.Discussion = FakeDiscussion
+                core_mod.Discussion = FakeDiscussion
                 try:
                     async with app.run_test() as pilot:
                         await pilot.pause()
@@ -910,7 +911,7 @@ class TuiSmokeTest(unittest.TestCase):
                         self.assertNotIn("bob", app._llm_agents)
                         self.assertEqual(len(app._discussions), 0)
                 finally:
-                    tui_mod.Discussion = orig
+                    core_mod.Discussion = orig
                 space.close()
         asyncio.run(run())
 
