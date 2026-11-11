@@ -16,16 +16,25 @@ The transcript is the same shape as chat but namespaced per architect::
 
 so a resumed board resumes every architect conversation too, and
 ``/architect`` (no arg) re-opens the active thread from the space.
+
+Budget policy (chat parity): the architect is conversational — the human
+steers turn by turn — so cost is tracked and reported, never enforced.
+Once usage crosses ``token_budget`` every send is still answered (the flag
+survives in the space for observability), with ``over_budget`` in the
+result so the shell can surface a warning. The substrate's step-boundary
+``BudgetExceeded`` stop-before-new-work semantics stay reserved for the
+*autonomous* agents (workers, generic agents, discussions), where nobody
+approves each turn.
 """
 
 from __future__ import annotations
 
 import json
 
-from tuple_space import BudgetExceeded, LLMAgent
+from tuple_space import LLMAgent
 
 from .board import board_view
-from .models import ARCHITECT, PROJECT
+from .models import ARCHITECT, FILE_CREATED, PROJECT
 
 __all__ = ["ArchitectAgent", "ARCHITECT_PROMPT", "ALLOWED_TOOLS"]
 
@@ -57,6 +66,11 @@ def _architect_system_prompt(name: str, role: str, skills: list[str]) -> str:
         f"You are an architect assistant named {name} (role: {role}), "
         "chatting with a human about a shared tuple space. Help the human "
         "explore the space and produce project files.",
+        "DELIVERY RULE: whenever the human asks you to write, create, "
+        "produce, plan, scaffold, or save any document, plan, code, or "
+        "artifact, ALWAYS produce it with create_file or scaffold_files, "
+        "writing the full content out. Never merely describe, outline, or "
+        "promise a file — if a file is wanted, the tool call IS the work.",
         "Use rdp and read_all to inspect any tuples in the space — task, "
         "knowledge, skill, agent_turn, file_created, and any other tag. "
         "Describe what you find to the human.",
@@ -65,8 +79,8 @@ def _architect_system_prompt(name: str, role: str, skills: list[str]) -> str:
         "rejected.",
         "Never modify the tuple space directly — the only side effects you "
         "create are files.",
-        "Always end with a prose reply: say what you found, which files you "
-        "created (with their relative paths), or what you suggest next. "
+        "Always end with a prose reply: list each file you created with "
+        "its relative path, then say what you found or suggest next. "
         "Be concise and conversational.",
     ]
     if skills:
@@ -151,13 +165,12 @@ class ArchitectAgent:
 
         # Restore budget state from the space so reopening a named architect
         # does not silently reset its token allowance. The substrate's agent
-        # keeps this in memory; we rehydrate it from the recorded budget.
+        # keeps this in memory; we rehydrate usage (never a blocker — the
+        # budget reports, it does not refuse, see the budget policy above).
         prior = space.read_all("budget", name, None, None, None, actor=name)
         if prior:
             last = prior[-1]
             self._agent.tokens_used = last[2]
-            if last[2] > last[4]:
-                self._agent._budget_exceeded = True
 
     # ── the space is the memory ────────────────────────────────────────
 
@@ -257,17 +270,18 @@ class ArchitectAgent:
         """One conversational turn. Writes the human turn, then the
         architect's reply when the model produced prose.
 
-        Budget enforcement is at the turn boundary: if a previous turn crossed
-        the budget, this entry raises before the human turn is written or any
-        API call is made.
+        Budget enforcement is *never blocking* (chat parity): usage is
+        tracked across turns and ``over_budget`` is reported in the result
+        once ``token_budget`` is crossed, so the shell can warn — the
+        conversation itself continues.
         """
-        if self._agent._budget_exceeded:
-            raise BudgetExceeded(
-                f"architect {self.name} exceeded token budget: "
-                f"{self._agent.tokens_used:,} / {self._agent.token_budget:,}"
-            )
         self.write_turn(self.human, text)
         self._ensure_registered()
+        # file_created is an append-only event log; the tuples added during
+        # this turn are the slice after the pre-turn count (the architect job
+        # is exclusive, so nothing else appends concurrently)
+        created_before = len(self.space.read_all(
+            FILE_CREATED, None, None, None, actor=self.name))
         messages = self._messages()
         tools = self._agent._tools
 
@@ -336,5 +350,15 @@ class ArchitectAgent:
             self.turns += 1
         # publish the final budget once so /agents-style observability sees it
         self._agent._publish_final_budget()
+        created = self.space.read_all(FILE_CREATED, None, None, None,
+                                      actor=self.name)[created_before:]
+        # one turn may overwrite the same path (create then fix): keep the
+        # latest record per path so delivery reporting never double-counts
+        latest: dict[str, dict] = {}
+        for _, rel, size, _ in created:
+            latest[rel] = {"path": rel, "bytes": int(size)}
         return {"reply": reply, "tokens_used": self._agent.tokens_used,
-                "api_calls": self._agent.api_calls}
+                "api_calls": self._agent.api_calls,
+                "files": list(latest.values()),
+                "over_budget":
+                    self._agent.tokens_used > self._agent.token_budget}

@@ -114,6 +114,9 @@ carried a `source` (`{"tag","id"}`).
 /architect                      # re-open the active transcript
 /architect start <n> <role> [s] # start/resume a named architect
 /architect <text>               # talk to the active architect (navigate + files)
+                                # each file written is ALSO recorded as a
+                                # knowledge tuple (name = path) — find it on
+                                # the knowledge tab; /files shows the raw log
 /files                          # projects + files agents have produced
 ```
 
@@ -238,7 +241,7 @@ space.rdp("dependency", tid, None)
 | chat history kept | `HISTORY_TURNS = 12` |
 | board snapshot per tag | `per_tag = 8` (newest-first, bounded read + `count`) |
 | tool result cap | `TOOL_RESULT_MAX = 20` |
-| token budget (workers/discussion/agents) | `LLMConfig.token_budget = 100_000` (step-boundary rule; chat has no cap) |
+| token budget (workers/discussion/agents) | `LLMConfig.token_budget = 100_000` (step-boundary rule; chat and architect have no cap — cost reported, never enforced) |
 
 ## 9. Cross-process (`--endpoint`)
 

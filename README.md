@@ -201,6 +201,10 @@ In the TUI (**`?` or `/help`** lists everything below):
   navigates the tuple space with you (raw `rdp` / `read_all`) and writes
   files/trees via `create_file` / `scaffold_files` under a sandbox;
   **`/files`** shows the projects and files agents have produced.
+  File delivery is *enforced* in code, not left to the model: every file a
+  turn actually wrote is also recorded as a `knowledge` tuple (name =
+  relative path, context = `architect <name>`), so the knowledge tab,
+  filter, and search detect delivery without hunting the filesystem.
 - **`/mode [human|auto]`** show/switch the agent's mode (persists in the
   board). **`/stock [path|off]`** mount/show/unmount common knowledge.
 - **`/help`** (or **`?`**) the full command reference.

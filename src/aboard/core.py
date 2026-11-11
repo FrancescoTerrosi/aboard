@@ -290,7 +290,7 @@ class BoardService:
             return CommandResult()
         ctx = ctx or CommandContext()
         if not line.startswith("/"):
-            return self._chat_cmd(line, ctx)
+            return self._cmd_chat(line, ctx)
         cmd, _, arg = line[1:].partition(" ")
         arg = arg.strip()
         if self._reset_armed and cmd != "reset":
@@ -839,13 +839,47 @@ class BoardService:
             observer.on_view(ViewState(
                 "architect", self.architect_snapshot(), scroll_end=True))
             observer.on_state()
-            observer.on_message(f"{result['tokens_used']:,} tokens · "
-                                f"{result['api_calls']} call(s)")
+            cost = (f"{result['tokens_used']:,} tokens · "
+                    f"{result['api_calls']} call(s)")
+            files = result.get("files") or []
+            if files:
+                cost += f" · {len(files)} file(s) → {self._record_files(files)}"
+            if result.get("over_budget"):
+                budget = self._architect_agent.llm.token_budget
+                observer.on_message(
+                    f"{cost} — over budget ({budget:,}); "
+                    "cost is reported, not enforced",
+                    level="warning")
+            else:
+                observer.on_message(cost)
         except Exception as e:
             observer.on_view(ViewState(
                 "architect", {**self.architect_snapshot(),
                               "error": str(e)}, scroll_end=True))
             observer.on_message(f"architect failed: {e}", level="error")
+
+    def _record_files(self, files: list[dict]) -> str:
+        """Enforce board-level detection of the architect's file delivery.
+
+        The substrate's ``file_created`` tuples are the raw event log (what
+        ``/files`` shows); this mirrors each delivered file into the curated
+        ``knowledge`` tag — deterministically, in code, never via the model
+        — so a delivered file is visible where the human already navigates:
+        the knowledge tab, the filter, wildcard search. It is an action
+        record (provenance of a completed side effect), not proposed
+        content, so it is written directly (not through the proposal gate)
+        and attributed to the architect in the WAL.
+        """
+        board = Board(self.space, actor=self._architect_agent.name)
+        ids = []
+        for f in files:
+            ids.append(board.insert(
+                "knowledge", name=f["path"],
+                context=f"architect {self._architect_agent.name}",
+                text=f"file written by architect "
+                     f"{self._architect_agent.name} ({f['bytes']} bytes); "
+                     f"sandbox: {self._architect_agent.sandbox}"))
+        return ", ".join(ids)
 
     async def do_plan(self, tid: str, observer: Observer) -> None:
         try:

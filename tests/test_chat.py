@@ -21,8 +21,31 @@ from aboard.chat import (MODES, ChatAgent, LLMConfig,
                          _auto_tool_schema, _human_tool_schema,
                          _read_tool_schema, _stock_tool_schema, _tool_schema)
 from aboard.board import Board
+from aboard.core import BoardService
 from aboard.session import load_stock
 from tests_support import ScriptedClient, call, completion
+
+
+class ChatDispatchTestCase(unittest.TestCase):
+    """How the service routes chat through its command seam."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.space = TupleSpace(run_root=self._tmp.name)
+        self.service = BoardService(board=Board(self.space))
+
+    def tearDown(self):
+        self.space.close()
+        self._tmp.cleanup()
+
+    def test_bare_text_and_slash_chat_dispatch_the_same(self):
+        # regression: handle() routed bare text to a nonexistent _chat_cmd,
+        # crashing the TUI (AttributeError) on any non-"/" input
+        for line in ("hi", "/chat hi"):
+            with self.subTest(line=line):
+                result = self.service.handle(line)
+                self.assertEqual(len(result.jobs), 1)
+                self.assertEqual(result.jobs[0].group, "chat")
 
 
 class ChatAgentTestCase(unittest.TestCase):
