@@ -124,6 +124,11 @@ A worker with skills claims tasks that are untagged or tagged with one of
 its skills; a generalist claims anything. `/dep` declares task dependencies
 (completion is signaled as `completed` tuples, so dependents become claimable).
 
+> **Two “skill” meanings.** The curated `skill` tag (`/add skill …`) is
+> board content that every worker sees in its bounded board snapshot. The
+> `[skills…]` list on `/agent add` (and `/spawn`) is a routing attribute,
+> matched against `/tag` requirements. They share a name but do not interact.
+
 ## 3b. Generic agents + a reviewer (multi-agent patterns)
 
 Beyond the curated task workers, ABoard can run **generic agents** that
@@ -142,7 +147,10 @@ that recommends verdicts on pending proposals:
 
 A generic agent steps until you stop it (or it runs out of budget), writing
 each turn to the board as an `agent_turn` tuple — so the transcript is part
-of the space and survives restarts. The reviewer is a *recommendation* only:
+of the space and survives restarts. Generic agents need an **in-process**
+board (`/spawn` is refused with `--endpoint`): the substrate's `LLMAgent`
+registers capabilities/budget through extended ops the HTTP wire protocol
+does not route. The reviewer is a *recommendation* only:
 the board stays human-authored (`/approve` / `/reject` remain the human's
 decision, and an unparseable reviewer reply is a safe "abstain", never an
 approval).
@@ -159,6 +167,27 @@ board (no separate space):
 Each turn is an `agent_turn` tuple; the driver feeds each agent the other's
 recent turns as context. There is no agent-to-agent channel — the tuple space
 is the only medium.
+
+The **architect** is a dedicated, sandboxed, `/chat`-like file-capable agent
+(in-process only, like `/spawn`):
+
+```
+/architect start archie builder web        ← start/resume a named architect
+/architect look at the tasks and scaffold a flask app   ← steer it turn by turn
+/architect                                 ← re-open the active transcript
+/files                                     ← projects + files it produced
+```
+
+Each turn is an `("architect", name, speaker, text)` tuple, so the
+conversation is part of the board and survives restarts. The architect
+navigates the raw tuple space with `rdp` / `read_all` (any tag) and writes
+files with `create_file` / `scaffold_files`; it never mutates the board
+directly through the model.
+
+Every file the architect writes lands under `<runs root>/projects/<name>/`;
+paths are sandboxed (absolute paths and `..` are rejected), and each write is
+recorded as a `file_created`/`file_error` tuple — the board stays the source
+of truth, the filesystem is just the materialization.
 
 ## 4. Chat with the agent (human-driven, the default)
 
@@ -188,8 +217,8 @@ What just happened, mechanically:
   *you*.
 - A proposal gets exactly one decision: `/reject p0` discards without
   applying.
-- Each turn toasts the cost ("2,829 tokens · 3 call(s)"). Crossing the
-  token budget refuses the *next* send with `BudgetExceeded`.
+- Each turn toasts the cost ("2,829 tokens · 3 call(s)"). Chat has no
+  hard budget cap — the conversation never blocks on cost.
 - The conversation is stored on the board as `("chat", speaker, text)`
   tuples — restart and the chat resumes with the board.
 
@@ -288,7 +317,7 @@ contract, and ABoard inherits it.
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests
 ```
 
-152 tests, all deterministic — no network, no terminal (the LLM is faked
+171 tests, all deterministic — no network, no terminal (the LLM is faked
 through a scripted client; TUI flows run under Textual's headless pilot; the
 HTTP-board tests run a real uvicorn server on loopback).
 
@@ -303,7 +332,7 @@ HTTP-board tests run a real uvicorn server on loopback).
 | Runs root | `--run-root` or `TUPLE_SPACE_ROOT` | `./.tuplespace/` (per project dir) |
 | Chat mode | `/mode [human\|auto]` (runtime, stored in the board) | `human` |
 | Stock mount | `/stock [path\|off]` (runtime, stored in the board) | none |
-| Token budget | `LLMConfig(token_budget=…)` | 100,000 |
+| Token budget (workers, discussion, generic agents) | `LLMConfig(token_budget=…)` | 100,000 — chat has no cap |
 
 ## 11. Troubleshooting
 
@@ -312,8 +341,6 @@ HTTP-board tests run a real uvicorn server on loopback).
 - **Chat errors with the default model** — `deepseek-v4.1-flash:cloud` is
   the pinned default but may not be installed; pass `--model` with
   something from `ollama list` (tools-capable models only).
-- **`chat agent … exceeded token budget`** — the budget is refused at the
-  *next* send; restart aboard or raise `LLMConfig.token_budget`.
 - **The board is empty after a restart** — you either ran with `--fresh`, or
   the last session made no changes and was skipped, or the last run was
   lost to a hard crash (documented crash window: entries buffered before a

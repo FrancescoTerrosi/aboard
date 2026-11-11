@@ -5,6 +5,8 @@ A professional, keyboard-driven TUI to navigate a tuple space of **tasks**,
 
 > **Try it:** [`RUNBOOK.md`](./RUNBOOK.md) — install to first chat in five
 > minutes, verified end-to-end. What it is and why: this file.
+> **Quick reference:** [`CHEATSHEET.md`](./CHEATSHEET.md) — commands, tuples,
+> agent mechanics, and verification paths.
 
 ABoard is a **separate project** layered on top of the generic
 [`tuple_space`](https://github.com/) substrate. It defines three conventions at
@@ -118,9 +120,11 @@ create → plan → work → approve:
   A failed or degenerate plan re-posts the parent unchanged — no work lost.
 - **`/work [n]`** — launches `n` worker agents (default 1). Each claims a
   task atomically (`inp` — exactly-once), executes it with the model
-  (grounded by a bounded board view, so results don't guess in isolation),
-  and proposes the result as a *knowledge add* into the existing
-  `/proposals` inbox — **you** approve it onto the board. The proposal
+  (grounded by a bounded, newest-first board view plus read-only
+  `board_list`/`board_get`/`board_search` retrieval tools, so results don't
+  guess in isolation), and proposes the result as a *knowledge add* into the
+  existing `/proposals` inbox — **you** approve it onto the board. The
+  proposal
   carries the task id as structured provenance and a self-contained context
   (the instruction text), so approved knowledge links back via a `derived`
   relation. A worker that fails re-posts its claimed task; a worker that
@@ -132,6 +136,14 @@ create → plan → work → approve:
   <skill>`** makes a task require a skill (a worker with skills claims only
   untagged or matching tasks), and **`/dep <task_id> <dep1>…`** declares
   task dependencies (workers skip tasks whose `completed` signals are unmet).
+
+  > **Two different “skill” meanings.** The curated `skill` tag
+  > (`/add skill …`, stored as `("skill", skill*N*, name, context, text)`)
+  > is **board content** — like knowledge, it appears in the bounded board
+  > snapshot every worker receives. The `[skills…]` list on `/agent add`
+  > (and `/spawn`) is a **routing attribute** stored in the agent tuple and
+  > matched against `/tag` requirements. They share a name but do not
+  > interact.
 - Everything is attributed in the WAL: `worker claimed t0 at seq N,`
   `proposed p1 at seq M, human applied at seq K`.
 
@@ -183,6 +195,12 @@ In the TUI (**`?` or `/help`** lists everything below):
   **`/review [pN]`** a reviewer writes a verdict per proposal (recommendation
   only). **`/discuss <a> <b> [topic]`** two agents take turns through the
   tuple space.
+- **`/architect`** re-opens the active architect transcript.
+  **`/architect start <name> <role> [skills…]`** starts (or resumes) a named,
+  file-capable agent; **`/architect <text>`** talks to it turn by turn. It
+  navigates the tuple space with you (raw `rdp` / `read_all`) and writes
+  files/trees via `create_file` / `scaffold_files` under a sandbox;
+  **`/files`** shows the projects and files agents have produced.
 - **`/mode [human|auto]`** show/switch the agent's mode (persists in the
   board). **`/stock [path|off]`** mount/show/unmount common knowledge.
 - **`/help`** (or **`?`**) the full command reference.
@@ -201,12 +219,13 @@ src/aboard/
   workers.py    TaskWorker + plan: claim → execute → propose, decompose into subtasks
   agents.py     named worker definitions (name, role, skills) in the space
   llm_agents.py GenericAgent: arbitrary LLMAgents coordinating on any tuples (Tier 3.1)
+  architect.py  ArchitectAgent: conversational, sandboxed file agent (Tier 3.4)
   reviewer.py   review: a reviewer writes approve/reject/abstain verdicts (Tier 3.2)
   discussion.py Discussion: two named agents take turns through the tuple space (Tier 3.2)
   http_space.py HttpSpace: join a shared HTTP board via --endpoint (Tier 3.3)
   tui.py        the textual full-screen navigator
-tests/          152 tests (models, board, session, proposals, chat, config, workers,
-                TUI, http_space, llm_agents, reviewer, discussion)
+tests/          171 tests (models, board, session, proposals, chat, config, workers,
+                TUI, http_space, llm_agents, architect, reviewer, discussion)
 ```
 
 ## Status
@@ -225,7 +244,12 @@ budget, and skills in the `/agents` panel), and `/review` runs a reviewer
 that writes an approve/reject/abstain verdict per pending proposal — a
 *recommendation only*; `/approve` stays the human's decision, so the board
 stays human-authored. The discussion sandbox (`/discuss <a> <b> [topic]`)
-has two named agents take turns through the tuple space.
+has two named agents take turns through the tuple space. The architect
+(Tier 3.4) is a `/chat`-like, sandboxed file-capable agent: start it with
+`/architect start <name> <role> [skills…]`, steer it turn by turn with
+`/architect <text>`, and it navigates the raw tuple space and writes files and
+directory trees via `create_file` / `scaffold_files`; `/files` lists what was
+produced.
 
 The cross-process board (Tier 3.3) is wired: `--endpoint <url>` joins a
 shared HTTP board instead of opening an in-process one (see
@@ -255,4 +279,9 @@ disabled in endpoint mode (the server is started with `--recover <run_dir>`
 to resume). Id autogen stays collision-free across clients via the atomic
 counter-claim, with counters seeded on connect. The server routes only the
 Linda primitives; ABoard's one needed extended op (`are_dependencies_met`)
-is recomposed client-side from `dependency` + `completed` tuples.
+is recomposed client-side from `dependency` + `completed` tuples. Generic
+agents (`/spawn`) therefore need an in-process board — the substrate's
+`LLMAgent` registers capabilities/budget through extended ops the wire does
+not route — so `/spawn` is refused with `--endpoint`. Workers, the reviewer,
+and the discussion sandbox work over the wire because they use only the
+Linda primitives.
