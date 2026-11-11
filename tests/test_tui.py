@@ -6,6 +6,7 @@ filter, row highlight → detail), not pixel output.
 """
 
 import asyncio
+import os
 import tempfile
 import unittest
 
@@ -526,31 +527,59 @@ class TuiSmokeTest(unittest.TestCase):
 
     def test_agent_commands_define_list_and_start(self):
         """Named agents: /agent add persists a definition, /agent lists it,
-        /agent start spawns a role-specialized worker."""
+        /agent start spawns a role-specialized worker and releases its name
+        when it stops."""
         async def run():
             with tempfile.TemporaryDirectory() as d:
                 space = TupleSpace(run_root=d)
                 board = Board(space, actor="human")
                 app = BoardApp(board=board, human="human")
-                async with app.run_test() as pilot:
-                    await pilot.pause()
-                    app._run_command("/agent add alice writer writing editing")
-                    await pilot.pause()
-                    self.assertEqual(space.rdp("agent", "alice", None, None),
-                                     ("agent", "alice", "writer",
-                                      ["editing", "writing"]))
-                    app._run_command("/agent")
-                    await pilot.pause()
-                    md = getattr(app.query_one("#detail_body", Markdown),
-                                 "_markdown", "") or ""
-                    self.assertIn("alice", md)
-                    self.assertIn("writer", md)
-                    app._run_command("/agent start alice")
-                    await pilot.pause()
-                    self.assertIn("alice", app._task_workers)
-                    self.assertEqual(app._task_workers["alice"].role, "writer")
-                    self.assertEqual(app._task_workers["alice"].skills,
-                                     ["editing", "writing"])
+                import aboard.tui as tui_mod
+                orig = tui_mod.TaskWorker
+
+                class FakeWorker:
+                    def __init__(self, space, *, name, llm,
+                                 role=None, skills=None):
+                        self.space = space
+                        self.name = name
+                        self.llm = llm
+                        self.role = role
+                        self.skills = list(skills or [])
+                        self.tokens_used = 0
+                        self.tasks_done = 0
+                        self._stopped = False
+                    def stop(self):
+                        self._stopped = True
+                    async def run(self, on_event=None):
+                        while not self._stopped:
+                            await asyncio.sleep(0.01)
+
+                tui_mod.TaskWorker = FakeWorker
+                try:
+                    async with app.run_test() as pilot:
+                        await pilot.pause()
+                        app._run_command("/agent add alice writer writing editing")
+                        await pilot.pause()
+                        self.assertEqual(space.rdp("agent", "alice", None, None),
+                                         ("agent", "alice", "writer",
+                                          ["editing", "writing"]))
+                        app._run_command("/agent")
+                        await pilot.pause()
+                        md = getattr(app.query_one("#detail_body", Markdown),
+                                     "_markdown", "") or ""
+                        self.assertIn("alice", md)
+                        self.assertIn("writer", md)
+                        app._run_command("/agent start alice")
+                        await pilot.pause()
+                        self.assertIn("alice", app._task_workers)
+                        self.assertEqual(app._task_workers["alice"].role, "writer")
+                        self.assertEqual(app._task_workers["alice"].skills,
+                                         ["editing", "writing"])
+                        app._run_command("/stop alice")
+                        await pilot.pause()
+                        self.assertNotIn("alice", app._task_workers)
+                finally:
+                    tui_mod.TaskWorker = orig
                 space.close()
         asyncio.run(run())
 
@@ -574,22 +603,76 @@ class TuiSmokeTest(unittest.TestCase):
                 space.close()
         asyncio.run(run())
 
+    def test_tuples_command_reads_any_tag_and_all(self):
+        """Wide-angle inspection: /tuples shows any tag, not just curated."""
+        async def run():
+            with tempfile.TemporaryDirectory() as d:
+                space = TupleSpace(run_root=d)
+                board = Board(space, actor="human")
+                board.insert("task", instruction="one")
+                space.out("dependency", "t0", ["t9"], actor="human")
+                app = BoardApp(board=board, human="human")
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    app._run_command("/tuples dependency")
+                    await pilot.pause()
+                    md = getattr(app.query_one("#detail_body", Markdown),
+                                 "_markdown", "") or ""
+                    self.assertIn("dependency", md)
+                    self.assertIn("t9", md)
+                    app._run_command("/tuples")
+                    await pilot.pause()
+                    md = getattr(app.query_one("#detail_body", Markdown),
+                                 "_markdown", "") or ""
+                    self.assertIn("task", md)
+                    self.assertIn("dependency", md)
+                space.close()
+        asyncio.run(run())
+
     def test_stop_named_worker(self):
         async def run():
             with tempfile.TemporaryDirectory() as d:
                 space = TupleSpace(run_root=d)
                 board = Board(space, actor="human")
                 app = BoardApp(board=board, human="human")
-                async with app.run_test() as pilot:
-                    await pilot.pause()
-                    app._run_command("/work 2")
-                    await pilot.pause()
-                    names = sorted(app._task_workers)
-                    self.assertEqual(names, ["w0", "w1"])
-                    app._run_command("/stop w0")
-                    await pilot.pause()
-                    self.assertTrue(app._task_workers["w0"]._stopped)
-                    self.assertFalse(app._task_workers["w1"]._stopped)
+                import aboard.tui as tui_mod
+                orig = tui_mod.TaskWorker
+
+                class FakeWorker:
+                    def __init__(self, space, *, name, llm,
+                                 role=None, skills=None):
+                        self.space = space
+                        self.name = name
+                        self.llm = llm
+                        self.role = role
+                        self.skills = list(skills or [])
+                        self.tokens_used = 0
+                        self.tasks_done = 0
+                        self._stopped = False
+                    def stop(self):
+                        self._stopped = True
+                    async def run(self, on_event=None):
+                        while not self._stopped:
+                            await asyncio.sleep(0.01)
+
+                tui_mod.TaskWorker = FakeWorker
+                try:
+                    async with app.run_test() as pilot:
+                        await pilot.pause()
+                        app._run_command("/work 2")
+                        await pilot.pause()
+                        names = sorted(app._task_workers)
+                        self.assertEqual(names, ["w0", "w1"])
+                        w0 = app._task_workers["w0"]
+                        w1 = app._task_workers["w1"]
+                        app._run_command("/stop w0")
+                        await pilot.pause()
+                        self.assertTrue(w0._stopped)
+                        self.assertFalse(w1._stopped)
+                        self.assertNotIn("w0", app._task_workers)  # released
+                        self.assertIn("w1", app._task_workers)     # still live
+                finally:
+                    tui_mod.TaskWorker = orig
                 space.close()
         asyncio.run(run())
 
@@ -623,6 +706,8 @@ class TuiSmokeTest(unittest.TestCase):
                         self.turns = 1
                         if on_event:
                             on_event(f"{self.name}: a turn")
+                        while not self._stopped:
+                            await asyncio.sleep(0.01)
 
                 async def fake_review(space, *, llm, pid=None, actor=None,
                                       client=None):
@@ -654,19 +739,107 @@ class TuiSmokeTest(unittest.TestCase):
                         await pilot.pause()
                         self.assertTrue(any("review: p0: approve" in t
                                             for t in toasts))
-                        # /stop halts the generic agent
+                        # /stop halts the generic agent and releases its name
+                        alice = app._llm_agents["alice"]
                         app._run_command("/stop alice")
                         await pilot.pause()
-                        self.assertTrue(app._llm_agents["alice"]._stopped)
+                        self.assertTrue(alice._stopped)
+                        self.assertNotIn("alice", app._llm_agents)
                 finally:
                     tui_mod.GenericAgent = orig_generic
                     tui_mod.review = orig_review
                 space.close()
         asyncio.run(run())
 
+    def test_architect_and_files(self):
+        """Tier 3.4: /architect is conversational — start, send a turn, and
+        /files renders the project + file records from the space."""
+        async def run():
+            with tempfile.TemporaryDirectory() as d:
+                space = TupleSpace(run_root=d)
+                board = Board(space, actor="human")
+                app = BoardApp(board=board, human="human")
+                import aboard.tui as tui_mod
+                orig = tui_mod.ArchitectAgent
+
+                class FakeArchitect:
+                    def __init__(self, space, *, name, role, human, llm,
+                                 sandbox, skills=None, client=None):
+                        self.space = space
+                        self.name = name
+                        self.role = role
+                        self.human = human
+                        self.sandbox = sandbox
+                        self.skills = list(skills or [])
+                        self.tokens_used = 0
+                        self.turns = 0
+                        if space.rdp("project", name, None) is None:
+                            space.out("project", name, sandbox, actor=name)
+
+                    async def send(self, text):
+                        self.space.out("architect", self.name, self.human,
+                                       text, actor=self.human)
+                        self.space.out("architect", self.name, self.name,
+                                       "ok", actor=self.name)
+                        self.turns += 1
+                        self.tokens_used = 7
+                        return {"reply": "ok", "tokens_used": 7,
+                                "api_calls": 1}
+
+                tui_mod.ArchitectAgent = FakeArchitect
+                toasts = []
+                app.notify = lambda msg, **kw: toasts.append(msg)
+                try:
+                    async with app.run_test() as pilot:
+                        await pilot.pause()
+                        app._run_command("/architect start arch builder web")
+                        await pilot.pause()
+                        self.assertIsNotNone(app._architect_agent)
+                        a = app._architect_agent
+                        self.assertEqual(a.name, "arch")
+                        self.assertEqual(a.role, "builder")
+                        self.assertEqual(a.skills, ["web"])
+                        self.assertEqual(a.sandbox,
+                                         os.path.join(d, "projects", "arch"))
+                        self.assertTrue(any("architect arch started" in t
+                                            for t in toasts))
+                        # now talk to it — a human turn + an architect reply
+                        app._run_command("/architect scaffold a node app")
+                        for _ in range(20):
+                            turns = space.read_all("architect", "arch",
+                                                   None, None)
+                            if len(turns) >= 2:
+                                break
+                            await pilot.pause()
+                        await pilot.pause()
+                        self.assertEqual(
+                            [(t[2], t[3]) for t in space.read_all(
+                                "architect", "arch", None, None)],
+                            [("human", "scaffold a node app"),
+                             ("arch", "ok")])
+                        md = getattr(app.query_one("#detail_body", Markdown),
+                                     "_markdown", "") or ""
+                        self.assertIn("scaffold a node app", md)
+                        self.assertIn("ok", md)
+                        # /files shows the project and any file records
+                        space.out("file_created", "README.md", "12", "success",
+                                  actor="arch")
+                        app._run_command("/files")
+                        await pilot.pause()
+                        md = getattr(app.query_one("#detail_body", Markdown),
+                                     "_markdown", "") or ""
+                        self.assertIn("arch", md)
+                        self.assertIn("README.md", md)
+                        self.assertIn("12 bytes", md)
+                finally:
+                    tui_mod.ArchitectAgent = orig
+                space.close()
+        asyncio.run(run())
+
     def test_discuss_command_starts_and_shows_transcript(self):
         """Tier 3.2 sandbox: /discuss starts two agents, writes interleaved
-        turns, /discuss re-opens the transcript, /stop ends it."""
+        turns, /discuss re-opens the transcript, /stop ends it and frees the
+        seats for a fresh discussion in the same session."""
         async def run():
             with tempfile.TemporaryDirectory() as d:
                 space = TupleSpace(run_root=d)
@@ -707,6 +880,9 @@ class TuiSmokeTest(unittest.TestCase):
                         self.b.turns = 1
                         if on_event:
                             on_event(f"{self.a.name}: hi")
+                        # stay live until stopped, like the real driver
+                        while not (self.a._stopped or self.b._stopped):
+                            await asyncio.sleep(0.01)
 
                 tui_mod.Discussion = FakeDiscussion
                 try:
@@ -725,11 +901,39 @@ class TuiSmokeTest(unittest.TestCase):
                         md = getattr(detail, "_markdown", "") or ""
                         self.assertIn("alice", md)
                         self.assertIn("bob", md)
+                        alice = app._llm_agents["alice"]
                         app._run_command("/stop alice")
                         await pilot.pause()
-                        self.assertTrue(app._llm_agents["alice"]._stopped)
+                        self.assertTrue(alice._stopped)
+                        # seats are released once the discussion ends
+                        self.assertNotIn("alice", app._llm_agents)
+                        self.assertNotIn("bob", app._llm_agents)
+                        self.assertEqual(len(app._discussions), 0)
                 finally:
                     tui_mod.Discussion = orig
+                space.close()
+        asyncio.run(run())
+
+    def test_discuss_no_arg_reads_transcript_from_the_space(self):
+        """After a restart there is no in-memory Discussion object, but the
+        agent_turn transcript is still in the space and must be readable."""
+        async def run():
+            with tempfile.TemporaryDirectory() as d:
+                space = TupleSpace(run_root=d)
+                space.out("agent_turn", "alice", "A1", actor="alice")
+                space.out("agent_turn", "bob", "B1", actor="bob")
+                board = Board(space, actor="human")
+                app = BoardApp(board=board, human="human")
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    app._run_command("/discuss")
+                    await pilot.pause()
+                    detail = app.query_one("#detail_body", Markdown)
+                    md = getattr(detail, "_markdown", "") or ""
+                    self.assertIn("alice", md)
+                    self.assertIn("A1", md)
+                    self.assertIn("bob", md)
+                    self.assertIn("B1", md)
                 space.close()
         asyncio.run(run())
 

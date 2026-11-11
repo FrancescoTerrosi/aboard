@@ -12,12 +12,16 @@ modifies the substrate, which stays schema-flexible underneath.
 from .models import (
     AGENT,
     AGENT_TURN,
+    ARCHITECT,
     BOOKKEEPING_TAGS,
     COMPLETED,
     COUNTER_TAG,
     DEPENDENCY,
     DERIVED,
+    FILE_CREATED,
+    FILE_ERROR,
     KNOWLEDGE,
+    PROJECT,
     RESET_TAGS,
     REVIEW,
     SKILL,
@@ -37,6 +41,7 @@ from .models import (
     spec,
 )
 from . import agents, config
+from .architect import ArchitectAgent
 from .board import Board, board_view, format_tuples
 from .chat import ChatAgent, LLMConfig, MODES
 from .discussion import Discussion
@@ -52,6 +57,7 @@ __all__ = [
     "format_tuples",
     "HttpSpace",
     "GenericAgent",
+    "ArchitectAgent",
     "Discussion",
     "review",
     "config",
@@ -86,8 +92,12 @@ __all__ = [
     "COUNTER_TAG",
     "AGENT",
     "AGENT_TURN",
+    "ARCHITECT",
     "REVIEW",
     "DERIVED",
+    "PROJECT",
+    "FILE_CREATED",
+    "FILE_ERROR",
     "TASK_SKILL",
     "DEPENDENCY",
     "COMPLETED",

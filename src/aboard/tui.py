@@ -22,8 +22,10 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import DataTable, Footer, Header, Input, Markdown, Select
 
-from tuple_space import BudgetExceeded
 from tuple_space import TupleSpace
+
+# Wide-angle tuple inspector: per-tag cap for the /tuples view (read-only).
+INSPECT_PER_TAG = 50
 
 
 class DetailPane(VerticalScroll):
@@ -41,12 +43,14 @@ class DetailPane(VerticalScroll):
 
 
 from . import agents, config
-from .board import Board
+from .architect import ArchitectAgent
+from .board import Board, format_tuples
 from .chat import ChatAgent, LLMConfig, MODES
 from .discussion import Discussion
 from .http_space import HttpSpace
 from .llm_agents import GenericAgent
-from .models import (AGENT_TURN, COUNTER_TAG, DEPENDENCY, RESET_TAGS, REVIEW,
+from .models import (AGENT_TURN, ARCHITECT, COUNTER_TAG, DEPENDENCY,
+                     FILE_CREATED, FILE_ERROR, PROJECT, RESET_TAGS, REVIEW,
                      TAGS, TASK_SKILL, fields)
 from .proposals import apply, describe, pending, reject
 from .reviewer import review
@@ -105,7 +109,8 @@ class BoardApp(App):
                  chat_mode: str = "human",
                  stock: list[tuple] | None = None,
                  llm: LLMConfig | None = None,
-                 chat_agent: ChatAgent | None = None):
+                 chat_agent: ChatAgent | None = None,
+                 architect_agent: ArchitectAgent | None = None):
         super().__init__()
         self.board = board if board is not None else Board(
             space if space is not None else TupleSpace())
@@ -115,8 +120,11 @@ class BoardApp(App):
         self.stock = stock             # read-only stock mount (launch snapshot)
         self.llm = llm                 # endpoint settings; lazily used on /chat
         self._chat_agent = chat_agent  # injectable for deterministic tests
+        self._architect_agent = architect_agent  # injectable for tests
+        self._architect_name = architect_agent.name if architect_agent else None
         self._tag = TAGS[0]           # the active tag
         self._detail_view: str | None = None   # transient pane view (below)
+        self._last_detail_markdown: str | None = None  # skip identical renders
         self._task_workers: dict[str, TaskWorker] = {}   # name → worker (see /work)
         self._llm_agents: dict[str, GenericAgent] = {}   # name → generic agent (see /spawn)
         self._discussions: list[Discussion] = []          # active discussions (see /discuss)
@@ -184,7 +192,7 @@ class BoardApp(App):
         if previous_tid and previous_tid in table.rows:
             table.move_cursor(row=list(table.rows).index(previous_tid))
         self.sub_title = f"{len(rows)} {self._tag} · " \
-            f"{len(pending(self.board.space))} proposal(s) pending"
+            f"{len(pending(self.board.space, actor=self.human))} proposal(s) pending"
 
     def _render_detail(self, tup: tuple) -> str:
         tag, tid = tup[0], tup[1]
@@ -208,7 +216,10 @@ class BoardApp(App):
         (a different row) returns the pane to item detail.
         ``scroll_end`` parks the pane at the bottom (chat: newest reply).
         """
+        if markdown == self._last_detail_markdown and view == self._detail_view:
+            return  # nothing changed: avoid a needless Markdown re-render flicker
         self._detail_view = view
+        self._last_detail_markdown = markdown
         pane = self.query_one("#detail", DetailPane)
         self.query_one("#detail_body", Markdown).update(markdown)
         if scroll_end:
@@ -306,8 +317,14 @@ class BoardApp(App):
             self._agent_cmd(arg)
         elif cmd == "spawn":
             self._spawn_cmd(arg)
+        elif cmd == "architect":
+            self._architect_cmd(arg)
         elif cmd == "agents":
             self._show_llm_agents()
+        elif cmd == "tuples":
+            self._tuples_cmd(arg)
+        elif cmd == "files":
+            self._files_cmd()
         elif cmd == "review":
             self._review_cmd(arg)
         elif cmd == "discuss":
@@ -394,7 +411,7 @@ class BoardApp(App):
         proposal (``/approve p<N>`` / ``/reject p<N>`` still target one
         explicitly, and ``a``/``r`` outside this view decide the oldest).
         """
-        ps = pending(self.board.space)
+        ps = pending(self.board.space, actor=self.human)
         self._proposals = ps
         if not ps:
             self._proposal_index = 0
@@ -550,7 +567,7 @@ class BoardApp(App):
             w = TaskWorker(self.board.space, name=name,
                           llm=self.llm or LLMConfig())
             self._task_workers[name] = w
-            self.run_worker(w.run(on_event=self._worker_event),
+            self.run_worker(self._run_task_worker(name, w),
                             thread=False, group=f"worker-{name}")
             started.append(name)
         self.notify(f"workers started: {', '.join(started)} — "
@@ -604,7 +621,7 @@ class BoardApp(App):
         w = TaskWorker(self.board.space, name=name, llm=self.llm or LLMConfig(),
                        role=role, skills=skills)
         self._task_workers[name] = w
-        self.run_worker(w.run(on_event=self._worker_event),
+        self.run_worker(self._run_task_worker(name, w),
                         thread=False, group=f"worker-{name}")
         self.notify(f"agent {name} started ({role})")
 
@@ -643,13 +660,130 @@ class BoardApp(App):
         if name in self._task_workers or name in self._llm_agents:
             self.notify(f"{name!r} is already running", severity="warning")
             return
-        a = GenericAgent(self.board.space, name=name, role=role,
-                         llm=self.llm or LLMConfig(), skills=skills)
+        try:
+            a = GenericAgent(self.board.space, name=name, role=role,
+                             llm=self.llm or LLMConfig(), skills=skills)
+        except ValueError as e:
+            self.notify(str(e), severity="error")
+            return
         self._llm_agents[name] = a
-        self.run_worker(a.run(on_event=self._worker_event),
+        self.run_worker(self._run_generic_agent(name, a),
                         thread=False, group=f"agent-{name}")
         skills_s = f" · skills: {', '.join(skills)}" if skills else ""
         self.notify(f"agent {name} spawned: {role}{skills_s} — /agents to watch")
+
+    def _architect_sandbox(self, name: str) -> str:
+        """The per-architect sandbox root (under the runs root's projects/)."""
+        run_dir = self.board.space.run_dir
+        base = Path(run_dir).parent if run_dir else Path.home() / ".aboard"
+        return str(base / "projects" / name)
+
+    def _architect_cmd(self, arg: str) -> None:
+        """`/architect` — the conversational architect surface.
+
+        `/architect` (no arg) re-opens the active transcript;
+        `/architect start <name> <role> [skills…]` starts (or resumes) a named
+        architect and makes it active; `/architect <text>` sends the active
+        architect a message. In-process only: files land on this machine, and
+        the wire protocol routes no file ops.
+        """
+        arg = arg.strip()
+        if not arg:
+            self._show_architect_transcript()
+            return
+        sub, _, rest = arg.partition(" ")
+        if sub == "start":
+            self._architect_start(rest.strip())
+            return
+        if self._architect_agent is None:
+            self.notify("no active architect — /architect start <name> <role> "
+                        "[skills…]", severity="warning")
+            return
+        self._architect_send(arg)
+
+    def _architect_start(self, rest: str) -> None:
+        parts = rest.split()
+        if len(parts) < 2:
+            self.notify("usage: /architect start <name> <role> [skills…]",
+                        severity="error")
+            return
+        name, role = parts[0], parts[1]
+        skills = parts[2:]
+        if name in self._task_workers or name in self._llm_agents:
+            self.notify(f"{name!r} is already running", severity="warning")
+            return
+        if getattr(self.board.space, "_remote", False):
+            self.notify("architect needs an in-process board (files land "
+                        "on this machine)", severity="warning")
+            return
+        sandbox = self._architect_sandbox(name)
+        try:
+            a = ArchitectAgent(self.board.space, name=name, role=role,
+                               human=self.human,
+                               llm=self.llm or LLMConfig(),
+                               sandbox=sandbox, skills=skills)
+        except ValueError as e:
+            self.notify(str(e), severity="error")
+            return
+        self._architect_agent = a
+        self._architect_name = name
+        skills_s = f" · skills: {', '.join(skills)}" if skills else ""
+        self.notify(f"architect {name} started ({role}){skills_s} — "
+                    f"sandbox {sandbox} · /architect <text> to talk")
+        self._show_architect_transcript()
+
+    def _architect_send(self, text: str) -> None:
+        """Send one turn to the active architect (never block the UI)."""
+        self.run_worker(self._do_architect(text), thread=False,
+                        exclusive=True, group="architect")
+
+    async def _do_architect(self, text: str) -> None:
+        try:
+            self._detail_update(self._render_architect(pending=text,
+                                                       thinking=True),
+                                view="architect")
+            result = await self._architect_agent.send(text)
+            self._detail_update(self._render_architect(), view="architect",
+                                scroll_end=True)
+            self._reload()   # file records / project tuples may have changed
+            self.notify(f"{result['tokens_used']:,} tokens · "
+                        f"{result['api_calls']} call(s)")
+        except Exception as e:
+            self._detail_update(
+                self._render_architect() + f"\n\n*architect failed: {e}*",
+                view="architect", scroll_end=True)
+            self.notify(f"architect failed: {e}", severity="error")
+
+    def _show_architect_transcript(self) -> None:
+        if self._architect_agent is None:
+            self._detail_update(
+                "## architect\n\n(none active — `/architect start <name> "
+                "<role> [skills…]` to start a file-capable agent)",
+                view="architect")
+            return
+        self._detail_update(self._render_architect(), view="architect",
+                            scroll_end=True)
+
+    def _render_architect(self, *, pending: str | None = None,
+                          thinking: bool = False) -> str:
+        name = self._architect_name or (self._architect_agent.name
+                                        if self._architect_agent else None)
+        turns = (self.board.space.read_all(ARCHITECT, name, None, None,
+                                           actor=self.human)
+                 if name else [])
+        lines = [f"## architect: {name}" if name else "## architect"]
+        for t in turns[-12:]:
+            lines.append(f"**{t[2]}:** {t[3]}")
+        if pending:
+            lines.append(f"**{self.human}:** {pending}")
+        if thinking:
+            lines.append("*…thinking*")
+        if len(lines) == 1:
+            return (f"## architect: {name}\n\n(no turns yet — say something)"
+                    if name else
+                    "## architect\n\n(none active — `/architect start <name> "
+                    "<role> [skills…]`)")
+        return "\n\n".join(lines)
 
     def _show_llm_agents(self) -> None:
         """The generic-agents panel: live transcript, budget, skills."""
@@ -668,6 +802,74 @@ class BoardApp(App):
             for t in turns[-3:]:
                 lines.append(f"  - {t[2]}")
         self._detail_update("\n".join(lines), view="agents")
+
+    # ── raw tuple inspector: /tuples [tag] ──────────────────────────────
+
+    def _tuples_cmd(self, arg: str) -> None:
+        """`/tuples [tag]` — read-only wide-angle inspection of the space.
+
+        With a tag, lists that tag's tuples (any tag, not just the curated
+        three). Without one, lists the whole space grouped by tag. Bounded
+        (``INSPECT_PER_TAG`` per tag), attributed to the human, and read-only
+        — this is a lens, never a mutation path.
+        """
+        space = self.board.space
+        tag = arg.strip()
+        if tag:
+            tuples = space.read_all(tag, None, actor=self.human)
+            if not tuples:
+                self._detail_update(f"## tuples: {tag}\n\n(no tuples)",
+                                    view="tuples")
+                return
+            self._detail_update(
+                f"## tuples: {tag}\n\n"
+                f"{format_tuples(tuples, limit=INSPECT_PER_TAG)}",
+                view="tuples")
+            return
+        snap = space.snapshot(actor=self.human)
+        if not snap:
+            self._detail_update("## tuples\n\n(space is empty)",
+                                view="tuples")
+            return
+        by_tag: dict[str, list] = {}
+        for t in snap:
+            by_tag.setdefault(t[0], []).append(t)
+        sections = [f"## tuples ({len(snap)} total)"]
+        for name in sorted(by_tag):
+            items = by_tag[name]
+            sections.append(f"### {name} ({len(items)})\n\n"
+                            f"{format_tuples(items, limit=INSPECT_PER_TAG)}")
+        self._detail_update("\n\n".join(sections), view="tuples")
+
+    def _files_cmd(self) -> None:
+        """`/files` — the artifacts view: projects + file records from the space.
+
+        Files are shown by their sandbox-relative path; the project rows give
+        the sandbox root that resolves them. Read-only (``read_all`` only).
+        """
+        space = self.board.space
+        projects = space.read_all(PROJECT, None, None, actor=self.human)
+        files = space.read_all(FILE_CREATED, None, None, None,
+                               actor=self.human)
+        errors = space.read_all(FILE_ERROR, None, None, None,
+                                actor=self.human)
+        lines = ["## files"]
+        if projects:
+            lines.append("### projects")
+            for p in projects:
+                lines.append(f"- `{p[1]}` → {p[2]}")
+        if files:
+            lines.append("### created")
+            for f in files:
+                lines.append(f"- `{f[1]}` ({f[2]} bytes)")
+        if errors:
+            lines.append("### errors")
+            for f in errors:
+                lines.append(f"- `{f[1]}`: {f[2]}")
+        if not projects and not files and not errors:
+            lines.append("(none — `/architect start <name> <role> [skills…]` "
+                         "then `/architect <text>` to scaffold)")
+        self._detail_update("\n".join(lines), view="files")
 
     # ── reviewer (Tier 3.2): /review ─────────────────────────────────────
 
@@ -699,8 +901,8 @@ class BoardApp(App):
     def _discuss_cmd(self, arg: str) -> None:
         """`/discuss <name1> <name2> [topic]` — two named agents take turns.
 
-        The two ``GenericAgent``s converse through the tuple space (each turn
-        an ``agent_turn`` tuple); the driver alternates, feeding each agent the
+        The two discussants converse through the tuple space (each turn an
+        ``agent_turn`` tuple); the driver alternates, feeding each agent the
         other's recent turns. ``/discuss`` with no argument re-opens the
         interleaved transcript; ``/stop <name>`` ends it.
         """
@@ -725,32 +927,81 @@ class BoardApp(App):
         self._llm_agents[name1] = d.a
         self._llm_agents[name2] = d.b
         self._discussions.append(d)
-        self.run_worker(d.run(on_event=self._worker_event),
+        self.run_worker(self._run_discussion(d, name1, name2),
                         thread=False, group=f"discuss-{name1}-{name2}")
         self.notify(f"discussion {name1} ↔ {name2} started — "
                     "/agents to watch, /stop to end")
 
+    async def _run_discussion(self, discussion: Discussion,
+                             name1: str, name2: str) -> None:
+        """Run one discussion, then release its two participant names.
+
+        Names stay registered in ``_llm_agents`` only while the discussion is
+        live; once it ends (rounds exhausted, empty turn, budget, or /stop)
+        the seats are freed so the same thread can be resumed with a fresh
+        ``/discuss <name1> <name2>`` in the same session.
+        """
+        try:
+            await discussion.run(on_event=self._worker_event)
+        finally:
+            self._llm_agents.pop(name1, None)
+            self._llm_agents.pop(name2, None)
+            if discussion in self._discussions:
+                self._discussions.remove(discussion)
+
+    async def _run_task_worker(self, name: str, worker: TaskWorker) -> None:
+        """Run one TaskWorker, then release its name.
+
+        A worker that has finished (no more tasks, budget crossed, or /stop)
+        is no longer running; dropping it from ``_task_workers`` keeps
+        ``/agent [list]`` and ``/status`` honest.
+        """
+        try:
+            await worker.run(on_event=self._worker_event)
+        finally:
+            self._task_workers.pop(name, None)
+
+    async def _run_generic_agent(self, name: str, agent: GenericAgent) -> None:
+        """Run one GenericAgent, then release its name (like discussions)."""
+        try:
+            await agent.run(on_event=self._worker_event)
+        finally:
+            self._llm_agents.pop(name, None)
+
     def _show_discussion(self, discussion: Discussion | None = None) -> None:
-        """The discussion view: the interleaved transcript of two agents."""
+        """The discussion view: the interleaved transcript of two agents.
+
+        The transcript lives in the space (``agent_turn`` tuples), so with no
+        live discussion this re-opens whatever turns the board actually holds —
+        it must not depend on the in-memory ``Discussion`` objects, which are
+        gone after a restart.
+        """
         if discussion is None:
-            if not self._discussions:
-                self._detail_update(
-                    "## discussion\n\n(none — `/discuss <name1> <name2> [topic]` "
-                    "to start two agents taking turns)", view="discussion")
-                return
-            discussion = self._discussions[-1]
-        names = {discussion.a.name, discussion.b.name}
-        turns = [t for t in self.board.space.read_all(AGENT_TURN, None, None,
-                                                      actor=self.human)
-                 if t[1] in names]
-        lines = [f"## discussion: {discussion.a.name} ↔ {discussion.b.name}"]
-        if discussion.topic:
-            lines.append(f"topic: {discussion.topic}")
+            discussion = self._discussions[-1] if self._discussions else None
+        turns = self.board.space.read_all(AGENT_TURN, None, None,
+                                          actor=self.human)
+        if discussion is not None:
+            names = {discussion.a.name, discussion.b.name}
+            turns = [t for t in turns if t[1] in names]
+            title = f"## discussion: {discussion.a.name} ↔ {discussion.b.name}"
+            topic = discussion.topic
+        else:
+            title = "## discussion"
+            topic = ""
+        header = title
+        if topic:
+            header += f"\n\ntopic: {topic}"
         if not turns:
-            lines.append("(no turns yet)")
-        for t in turns:
-            lines.append(f"**{t[1]}:** {t[2]}")
-        self._detail_update("\n\n".join(lines), view="discussion")
+            self._detail_update(header + "\n\n(no turns yet — "
+                                "`/discuss <name1> <name2> [topic]` "
+                                "to start two agents taking turns)",
+                                view="discussion")
+            return
+        body = "\n\n---\n\n".join(
+            f"### {t[1]} · turn {i}\n\n{t[2]}"
+            for i, t in enumerate(turns, 1))
+        self._detail_update(header + "\n\n" + body, view="discussion",
+                            scroll_end=True)
 
     # ── task routing metadata: /tag <tid> <skill> · /dep <tid> <deps> ──
 
@@ -811,6 +1062,10 @@ class BoardApp(App):
             self._show_status()
         elif self._detail_view == "discussion":
             self._show_discussion()
+        elif self._detail_view == "files":
+            self._files_cmd()
+        elif self._detail_view == "architect":
+            self._show_architect_transcript()
 
     def action_approve(self) -> None:
         self._decide(self._selected_proposal_pid(), approve=True)
@@ -948,12 +1203,18 @@ class BoardApp(App):
 - `/spawn <name> <role> [skills…]` — launch a generic LLM agent coordinating
   on ANY tuples · `/agents` — the generic-agents panel (transcript, budget,
   skills)
+- `/architect` — re-open the active architect transcript ·
+  `/architect start <name> <role> [skills…]` — start/resume a file-capable
+  agent · `/architect <text>` — talk to it (navigates the tuple space and
+  writes files via `create_file`/`scaffold_files`) · `/files` — what agents
+  have scaffolded
 - `/review [pN]` — a reviewer writes an approve/reject/abstain verdict per
   pending proposal (recommendation only — `/approve` still decides)
 - `/discuss <name1> <name2> [topic]` — two named agents take turns through the
   tuple space · `/discuss` re-opens the interleaved transcript
 - `/tag <task_id> <skill>` — require a skill for a task
 - `/dep <task_id> <dep1> [dep2…]` — declare task dependencies
+- `/tuples [tag]` — read-only raw view of the space (one tag, or all grouped)
 - `/status` — tasks/proposals/agents/workers at a glance
 - `/stock [path|off]` — mount shared knowledge read-only; `/stock` shows the
   mount · `/import <tag> <id>` — copy a stock item onto the board
@@ -967,7 +1228,7 @@ class BoardApp(App):
 
     def _render_help(self) -> str:
         """The help reference plus a live context footer (current board)."""
-        props = len(pending(self.board.space))
+        props = len(pending(self.board.space, actor=self.human))
         ctx = [
             f"- chat mode: {self.chat_mode} (`/mode` to switch)",
             f"- stock: {'mounted' if self.stock else 'none'} (`/stock` to mount)",
@@ -979,8 +1240,7 @@ class BoardApp(App):
         """The /status view — the board at a glance."""
         space = self.board.space
         tasks = len(space.read_all("task", None, None, actor=self.human))
-        props = len(space.read_all("proposal", None, None, None, None,
-                                   actor=self.human))
+        props = len(pending(space, actor=self.human))
         lines = ["## status",
                  f"- tasks pending: {tasks}",
                  f"- proposals pending: {props}"]
@@ -1006,6 +1266,12 @@ class BoardApp(App):
             lines.extend(f"  - {a.name} ({a.role}): {a.turns} turn(s), "
                          f"{a.tokens_used:,} tokens"
                          for a in self._llm_agents.values())
+        if self._architect_agent:
+            a = self._architect_agent
+            skills_s = f" · skills: {', '.join(a.skills)}" if a.skills else ""
+            lines.append("- architect:")
+            lines.append(f"  - {a.name} ({a.role}{skills_s}): {a.turns} turn(s), "
+                         f"{a.tokens_used:,} tokens")
         lines.append(f"- chat mode: {self.chat_mode} (/mode to switch)")
         self._detail_update("\n".join(lines), view="status")
 
@@ -1044,8 +1310,6 @@ class BoardApp(App):
             self._reload()   # board_add / board_claim may have changed the table
             self.notify(f"{result['tokens_used']:,} tokens · "
                         f"{result['api_calls']} call(s)")
-        except BudgetExceeded as e:
-            self.notify(str(e), severity="error")
         except Exception as e:
             self.notify(f"chat failed: {e}", severity="error")
 
