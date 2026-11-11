@@ -60,6 +60,17 @@ class SubmitTest(unittest.TestCase):
                      if r["op"] == "OUT" and r["args"] and r["args"][0] == "proposal"]
         self.assertEqual([r["actor"] for r in prop_outs], ["assistant"])
 
+    def test_pending_read_is_actor_attributed(self):
+        submit(self.space, "add", "task", {"instruction": "x"}, actor="assistant")
+        pending(self.space, actor="reader")
+        self.space.flush_log()
+        recs = [json.loads(l) for l in open(self.space.ops_jsonl_path) if l.strip()]
+        reads = [r for r in recs
+                 if r["op"] == "READ_ALL" and r["args"][:1] == ["proposal"]
+                 and len(r["args"]) == 5]
+        self.assertTrue(reads)
+        self.assertTrue(all(r["actor"] == "reader" for r in reads))
+
 
 class DecideTest(unittest.TestCase):
     def setUp(self):
@@ -143,6 +154,10 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(describe(t6),
                          "p2: add knowledge (name='r', context='task t0', "
                          "text='…') ← task t0")
+        # a claim with provenance shows it too (consistency, not just adds)
+        self.assertEqual(describe(("proposal", "p3", "claim", "task",
+                                   {"id": "t1"}, {"tag": "task", "id": "t0"})),
+                         "p3: claim task t1 ← task t0")
 
 
 if __name__ == "__main__":

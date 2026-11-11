@@ -57,7 +57,8 @@ def _review_context(space, target, actor=None) -> str:
     rest) — the reconciliation a human would otherwise do by eye.
     """
     parts = ["[current board]\n" + board_view(space, actor=actor)]
-    siblings = [describe(p) for p in pending(space) if p[1] != target[1]]
+    siblings = [describe(p) for p in pending(space, actor=actor)
+                if p[1] != target[1]]
     if siblings:
         parts.append("Other pending proposals:\n" +
                      "\n".join(f"- {s}" for s in siblings))
@@ -77,7 +78,7 @@ async def review(space, *, llm, pid: Optional[str] = None,
     client = client if client is not None else \
         OpenAICompatibleClient(llm.base_url, api_key=llm.api_key)
 
-    targets = pending(space)
+    targets = pending(space, actor=actor)
     if pid is not None:
         targets = [p for p in targets if p[1] == pid]
     if not targets:

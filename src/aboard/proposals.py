@@ -63,6 +63,10 @@ def submit(space, kind: str, tag: str, values: dict, *, actor: str,
                 raise ValueError(f"{f} must be a str, got {type(v).__name__}")
         if not full[key_field(tag)].strip():
             raise ValueError(f"{key_field(tag)!r} is required for {tag!r}")
+        # Store the canonical field set: a stored proposal is then
+        # self-contained and applyable as-is, with no field defaults
+        # deferred to apply time.
+        values = full
     else:  # CLAIM
         tid = values.get("id")
         if not isinstance(tid, str) or not tid:
@@ -79,16 +83,26 @@ def submit(space, kind: str, tag: str, values: dict, *, actor: str,
     return pid
 
 
-def pending(space) -> list[tuple]:
-    """Every undecided proposal, oldest first."""
-    return space.read_all(PROPOSAL, None, None, None, None)
+def pending(space, *, actor=None) -> list[tuple]:
+    """Every undecided proposal, oldest first.
+
+    The 5-field template is deliberate: with the substrate's default
+    prefix matching it matches both the current 6-field proposal
+    ``(proposal, pid, kind, tag, values, source)`` and the older 5-field
+    shape ``(proposal, pid, kind, tag, values)`` — so proposals written by
+    an earlier version still reach the decision inbox. Reads are attributed
+    to ``actor`` like every other ABoard read.
+    """
+    return space.read_all(PROPOSAL, None, None, None, None, actor=actor)
 
 
 def _take(space, pid: Optional[str], *, actor) -> Optional[tuple]:
     """Claim the decision on one proposal (atomic; exactly one decision)."""
     if pid is not None:
+        # 5-field template, prefix-matching both the 6- and 5-field shapes
+        # (see ``pending``).
         return space.inp(PROPOSAL, pid, None, None, None, actor=actor)
-    for t in pending(space):  # oldest first
+    for t in pending(space, actor=actor):  # oldest first
         got = space.inp(PROPOSAL, t[1], None, None, None, actor=actor)
         if got is not None:
             return got
@@ -109,7 +123,13 @@ def apply(space, board, pid: Optional[str] = None, *,
     if kind == ADD:
         tid = board.insert(tag, **values)
         if source:
-            space.out(DERIVED, tid, source["tag"], source["id"], actor=actor)
+            try:
+                space.out(DERIVED, tid, source["tag"], source["id"], actor=actor)
+            except Exception as e:
+                # the decision has already landed; provenance is best-effort
+                # and must never turn an applied proposal into an exception
+                return (f"{t[1]}: added {tag} {tid} "
+                        f"(provenance not recorded: {e})")
         return f"{t[1]}: added {tag} {tid}"
     if kind == CLAIM:
         got = board.remove(tag, values["id"])
@@ -130,8 +150,8 @@ def describe(t: tuple) -> str:
     """One-line human-readable rendering (the /proposals view, tool results)."""
     pid, kind, tag, values = t[1], t[2], t[3], t[4]
     source = t[5] if len(t) > 5 else None
+    src = f" ← {source['tag']} {source['id']}" if source else ""
     if kind == ADD:
         preview = ", ".join(f"{k}={v!r}" for k, v in values.items())
-        src = f" ← {source['tag']} {source['id']}" if source else ""
         return f"{pid}: add {tag} ({preview}){src}"
-    return f"{pid}: claim {tag} {values.get('id')}"
+    return f"{pid}: claim {tag} {values.get('id')}{src}"
