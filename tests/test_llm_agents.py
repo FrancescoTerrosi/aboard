@@ -75,6 +75,18 @@ class GenericAgentTest(unittest.TestCase):
         self.assertEqual(self.space.read_all("agent_turn", "alice", None), [])
         self.assertTrue(any("failed" in e for e in events))
 
+    def test_remote_space_refused_with_clear_error(self):
+        # a remote board routes only the Linda primitives; the substrate's
+        # LLMAgent needs extended ops, so fail fast instead of mid-step.
+        remote = type("Remote", (), {"_remote": True})()
+        with self.assertRaises(ValueError):
+            GenericAgent(remote, name="alice", role="analyst", llm=self.llm)
+
+    def test_in_process_space_is_accepted(self):
+        a = self._agent(client=ScriptedClient(completion("x")))
+        asyncio.run(a.run(max_steps=1))
+        self.assertEqual(a.turns, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

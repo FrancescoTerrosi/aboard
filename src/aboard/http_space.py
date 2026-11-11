@@ -3,9 +3,9 @@
 ``--endpoint <url>`` connects a TUI to a ``tuple_space.server`` instance
 instead of creating/recovering an in-process ``TupleSpace``. This adapter
 presents the same synchronous surface the rest of ABoard uses — ``out``,
-``rdp``, ``inp``, ``read_all``, ``snapshot``, ``flush_log``, ``close`` —
-each a ``SyncTupleSpaceClient.dispatch(...)`` that converts JSON back to
-tuples. In-process mode (the default) is untouched.
+``rdp``, ``inp``, ``read_all``, ``count``, ``snapshot``, ``flush_log``,
+``close`` — each a ``SyncTupleSpaceClient.dispatch(...)`` that converts JSON
+back to tuples. In-process mode (the default) is untouched.
 
 Why a *synchronous* adapter: ABoard's board/config/proposals/workers layers
 all call the space synchronously (``space.read_all(...)``, ``space.inp(...)``),
@@ -23,6 +23,10 @@ Caveats, mirroring the plan's "cross-process board" notes:
   This adapter exposes ``run_dir = None``, so client-side resume/archive
   paths no-op gracefully and ``/reset`` is refused by the TUI (see
   ``tui._reset_cmd``).
+- **Bounded reads are client-side.** ``read_all(limit=…)``/``reverse=…`` and
+  ``count`` are emulated over the wire (the server routes a plain
+  ``read_all``); the boundedness is therefore in the slice the client keeps,
+  not in the server's read.
 - **Id-autogen seed race.** ``reserve_id``'s counter claim (``inp``) is
   atomic across processes, but its *seed* step is not. This adapter seeds
   every counter eagerly on connect, so after a client connects the counters
@@ -106,10 +110,22 @@ class HttpSpace:
             {"op": "inp", "template": list(template), "actor": actor})
         return _as_tuple(payload.get("tuple"))
 
-    def read_all(self, *template, actor=None):
+    def read_all(self, *template, actor=None, limit=None, reverse=False):
         payload = self._dispatch(
             {"op": "read_all", "template": list(template), "actor": actor})
-        return [tuple(t) for t in payload.get("tuples", [])]
+        tuples = [tuple(t) for t in payload.get("tuples", [])]
+        if reverse:
+            tuples = list(reversed(tuples))
+        if limit is not None:
+            tuples = tuples[:limit]
+        return tuples
+
+    def count(self, *template, actor=None):
+        """Total matching tuples over the wire (the server has no count
+        route, so this is ``len(read_all(...))`` — a full remote read)."""
+        payload = self._dispatch(
+            {"op": "read_all", "template": list(template), "actor": actor})
+        return len(payload.get("tuples", []))
 
     def snapshot(self, actor=None):
         payload = self._dispatch({"op": "snapshot"})

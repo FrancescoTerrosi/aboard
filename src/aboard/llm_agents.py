@@ -66,6 +66,17 @@ class GenericAgent:
         self.turns = 0
         self._stopped = False
 
+        if getattr(space, "_remote", False):
+            # The substrate's LLMAgent registers capabilities and budgets on
+            # its first step via extended ops that the HTTP wire protocol does
+            # not route. A generic agent therefore needs the in-process space;
+            # fail fast here rather than crashing mid-step on a missing op.
+            raise ValueError(
+                "generic agents need an in-process board: the wire protocol "
+                "routes only the Linda primitives, not the extended ops "
+                "(capability/budget/trace) the substrate's LLMAgent uses"
+            )
+
         prompt = system_prompt or GENERIC_PROMPT
         if goal:
             prompt += f"\nYour goal: {goal}."
