@@ -9,6 +9,8 @@ Filter  = client-side substring over the loaded board (navigation only; never
 
 from __future__ import annotations
 
+from typing import Optional
+
 from .models import (
     TAGS,
     all_template,
@@ -22,28 +24,43 @@ from .models import (
 )
 
 
-def format_tuples(tuples: list, limit: int = 20) -> str:
+def format_tuples(tuples: list, limit: int = 20,
+                  total: Optional[int] = None) -> str:
     """Render tuples for the model, repr-quoted so field boundaries are
-    unambiguous even when content contains commas."""
+    unambiguous even when content contains commas.
+
+    ``total`` is the true number of matching tuples when ``tuples`` is a
+    bounded slice; it defaults to ``len(tuples)``.
+    """
     if not tuples:
         return "0 items"
-    shown = "; ".join(", ".join(repr(v) for v in t) for t in tuples[:limit])
-    more = f"; … (+{len(tuples) - limit} more)" if len(tuples) > limit else ""
-    return f"{len(tuples)} items: {shown}{more}"
+    shown = tuples[:limit]
+    total = len(tuples) if total is None else total
+    text = "; ".join(", ".join(repr(v) for v in t) for t in shown)
+    more = f"; … (+{total - len(shown)} more)" if total > len(shown) else ""
+    return f"{total} items: {text}{more}"
 
 
-def board_view(space, *, actor=None, per_tag: int = 8) -> str:
+def board_view(space, *, actor=None, per_tag: int = 8,
+               newest_first: bool = True) -> str:
     """A bounded snapshot of the curated board, injected as agent context.
 
-    Read-only (a ``read_all`` per tag) and capped per tag, so workers and the
-    reviewer get grounding without an unbounded context. The tuple space's
-    retrieval discipline: a curated, bounded briefing beats a full dump.
+    Reads at most ``per_tag`` tuples per tag (``read_all(limit=…)``) and
+    reports the true total via ``count`` — so the read itself is bounded,
+    not merely the rendered string. ``newest_first`` returns the most recent
+    matches first (LIFO); set it ``False`` for insertion order.
     """
     lines = []
     for tag in TAGS:
-        tuples = space.read_all(*all_template(tag), actor=actor)
-        lines.append(f"{tag}: " + (format_tuples(tuples, limit=per_tag)
-                                   if tuples else "none"))
+        template = all_template(tag)
+        total = space.count(*template, actor=actor)
+        if total == 0:
+            lines.append(f"{tag}: none")
+            continue
+        tuples = space.read_all(*template, actor=actor,
+                                limit=per_tag, reverse=newest_first)
+        lines.append(f"{tag}: "
+                     f"{format_tuples(tuples, limit=per_tag, total=total)}")
     return "\n".join(lines)
 
 

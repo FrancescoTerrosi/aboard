@@ -4,7 +4,7 @@ import unittest
 
 from tuple_space import TupleSpace
 
-from aboard.board import Board
+from aboard.board import Board, board_view
 
 
 class BoardTest(unittest.TestCase):
@@ -119,6 +119,56 @@ class BoardTest(unittest.TestCase):
         tid = self.board.insert("knowledge", name="a")
         self.board.remove("knowledge", tid)
         self.assertIsNone(self.space.rdp("knowledge", tid))
+
+
+class BoardViewTest(unittest.TestCase):
+    """``board_view`` is a bounded, newest-first briefing for agents."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.space = TupleSpace(run_root=self._tmp.name)
+        self.board = Board(self.space)
+
+    def tearDown(self):
+        self.space.close()
+        self._tmp.cleanup()
+
+    def test_newest_first_with_true_total_and_overflow_count(self):
+        for i in range(10):
+            self.board.insert("task", instruction=f"task {i}")
+        view = board_view(self.space, per_tag=3)
+        self.assertIn("task: 10 items", view)          # count, not slice length
+        self.assertIn("'t9'", view)                     # LIFO: newest first
+        self.assertIn("'t8'", view)
+        self.assertIn("'t7'", view)
+        self.assertNotIn("'t0'", view)
+        self.assertIn("(+7 more)", view)                # the unseen remainder
+
+    def test_insertion_order_is_opt_in(self):
+        self.board.insert("task", instruction="first")
+        self.board.insert("task", instruction="second")
+        view = board_view(self.space, newest_first=False)
+        self.assertLess(view.index("'t0'"), view.index("'t1'"))
+
+    def test_read_is_bounded_not_just_rendered(self):
+        class Probe:
+            def __init__(self):
+                self.read_calls = []
+                self.count_calls = []
+
+            def count(self, *template, actor=None):
+                self.count_calls.append(template)
+                return 3
+
+            def read_all(self, *template, actor=None, limit=None, reverse=False):
+                self.read_calls.append((template, limit, reverse))
+                return [("task", f"t{i}", "x") for i in range(limit or 0)]
+
+        probe = Probe()
+        board_view(probe, per_tag=8)
+        self.assertEqual(len(probe.count_calls), 3)      # one count per tag
+        self.assertTrue(all(limit == 8 for _, limit, _ in probe.read_calls))
+        self.assertTrue(all(reverse is True for _, _, reverse in probe.read_calls))
 
 
 class BoardAttributionTest(unittest.TestCase):
