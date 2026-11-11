@@ -8,7 +8,10 @@ An agent is a tuple that describes what a worker should be when it starts::
   ``/stop <name>``).
 - ``role`` — a short role string injected into the worker's prompt.
 - ``skills`` — an optional list of capabilities that gate task claims
-  (skill routing; see ``workers.TaskWorker``). Empty = generalist.
+  (skill routing; see ``workers.TaskWorker``). Empty = generalist. This
+  list is unrelated to the curated ``skill`` tag (``("skill", skill*N*,
+  name, context, text)``): the tag is board content, these are routing
+  strings matched against ``task_skill`` tuples.
 
 Agents are defined but *idle* until started with ``/agent start <name>``.
 Definitions persist in the space (mutations like any other), so a resumed

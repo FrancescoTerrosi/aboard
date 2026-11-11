@@ -15,7 +15,7 @@ from tuple_space.llm_client import OpenAICompatibleClient
 
 from aboard.chat import LLMConfig
 from aboard.workers import TaskWorker, claim_task, plan, repost_task
-from tests_support import ScriptedClient, completion
+from tests_support import ScriptedClient, call, completion
 
 
 def text_completion(content, total=10):
@@ -78,6 +78,23 @@ class WorkerTest(unittest.TestCase):
         user = w.client.calls[0]["messages"][1]["content"]
         self.assertIn("[current board]", user)
         self.assertIn("existing", user)   # the knowledge item is in the briefing
+
+    def test_worker_can_retrieve_beyond_the_snapshot_with_read_only_tools(self):
+        self.space.out("task", "t0", "do A", actor="human")
+        self.space.out("knowledge", "know0", "n", "ctx", "extra", actor="human")
+        w = TaskWorker(self.space, name="w0", llm=self.llm,
+                       client=ScriptedClient(
+                           completion(tool_calls=[call("board_search", {
+                               "tag": "knowledge", "values": {"name": "n"}})]),
+                           completion(content="found it")))
+        asyncio.run(w.run())
+        # the read-only tool result fed the model the searched knowledge
+        tool_msg = w.client.calls[1]["messages"][-1]
+        self.assertEqual(tool_msg["role"], "tool")
+        self.assertIn("'n'", tool_msg["content"])
+        # the worker still proposes its result (no direct write)
+        prop = self.space.rdp("proposal", "p0", None, None, None)
+        self.assertEqual(prop[4]["text"], "found it")
 
     def test_two_workers_claim_exactly_once(self):
         for i in range(3):
